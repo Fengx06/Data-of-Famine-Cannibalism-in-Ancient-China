@@ -50,13 +50,22 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.minimax.chat/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "abab6.5s-chat")
 
 CONCURRENT_REQUESTS = 5           # 默认并发数
-REQUEST_TIMEOUT = 120             # 单次请求超时（秒）
+REQUEST_TIMEOUT = 180             # 单次请求超时（秒）
 MAX_RETRIES = 3                   # 失败重试次数
-MAX_CONTENT_CHARS = 4000          # 单请求内容最大字符数，超长则拆分
-MAX_TOKENS = 16384                # LLM 输出 token 上限（需预留 think 推理空间）
+MAX_CONTENT_CHARS = 2500          # 单请求内容最大字符数，超长则拆分
+MAX_TOKENS = 40000                # LLM 输出 token 上限（需预留 think 推理空间）
 
 # CSV 写入锁（防止多进程/多实例并发写入导致行交错）
 _CSV_LOCK = threading.Lock()
+
+
+class LLMExtractError(Exception):
+    """LLM 提取最终失败，所有重试均无效。"""
+
+    def __init__(self, year_ce: int, year_era: str, message: str = ""):
+        self.year_ce = year_ce
+        self.year_era = year_era
+        super().__init__(f"{year_era}({year_ce}) {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +248,13 @@ async def _call_llm_single(
                     # 解析为空但请求成功，继续重试
                     continue
             except Exception as e:
-                print(f"  [Retry {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) request failed: {e}")
+                tqdm.write(f"  [Retry {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) request failed: {e}")
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(2 ** attempt)
 
     # 检查是否是 think 过程耗尽 token 导致无 JSON 输出
     if _is_think_exhausted(last_raw):
-        print(f"  [Retry] {year_era}({year_ce}) think tokens exhausted, forcing JSON output...")
+        tqdm.write(f"  [Retry] {year_era}({year_ce}) think tokens exhausted, forcing JSON output...")
         forced_payload = {
             "model": LLM_MODEL,
             "messages": [
@@ -268,11 +277,11 @@ async def _call_llm_single(
                     raw = data["choices"][0]["message"]["content"]
                     return parse_llm_response(raw, year_era, year_ce)
             except Exception as e:
-                print(f"  [Skip] {year_era}({year_ce}) forced JSON request also failed: {e}")
+                tqdm.write(f"  [Skip] {year_era}({year_ce}) forced JSON request also failed: {e}")
                 return []
 
-    print(f"  [Skip] {year_era}({year_ce}) final failure")
-    return []
+    tqdm.write(f"  [Skip] {year_era}({year_ce}) final failure")
+    raise LLMExtractError(year_ce, year_era)
 
 
 async def call_llm_extract(
@@ -308,7 +317,7 @@ async def call_llm_extract(
     if current_chunk:
         chunks.append(current_chunk)
 
-    print(f"  [{year_ce}] {year_era} content too long ({len(content)} chars), split into {len(chunks)} requests")
+    tqdm.write(f"  [{year_ce}] {year_era} content too long ({len(content)} chars), split into {len(chunks)} requests")
 
     all_records: list[dict] = []
     for idx, chunk_lines in enumerate(chunks, 1):
@@ -317,7 +326,7 @@ async def call_llm_extract(
         header = f"【{year_era}（{year_ce}年）记录共 {len(chunks)} 部分，此为第 {idx} 部分】"
         records = await _call_llm_single(session, semaphore, year_era, year_ce, header + "\n" + chunk_content)
         all_records.extend(records)
-        print(f"    - Part {idx}/{len(chunks)} -> {len(records)} records")
+        tqdm.write(f"    - Part {idx}/{len(chunks)} -> {len(records)} records")
 
     return all_records
 
@@ -374,7 +383,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
                     rec["year_era"] = year_era
                     rec["year_ce"] = year_ce
             return records
-        print(f"  [Format error] {year_era}({year_ce}): response is not an array")
+        tqdm.write(f"  [Format error] {year_era}({year_ce}): response is not an array")
         return []
 
     # 尝试提取方括号包裹的内容
@@ -390,7 +399,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
             try:
                 records = json.loads(text[start:] + "]")
             except json.JSONDecodeError:
-                print(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
+                tqdm.write(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
                 _save_debug_raw(year_ce, raw)
                 return []
     elif start != -1:
@@ -398,16 +407,16 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
         try:
             records = json.loads(text[start:] + "]")
         except json.JSONDecodeError:
-            print(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
+            tqdm.write(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
             _save_debug_raw(year_ce, raw)
             return []
     else:
-        print(f"  [Parse failed] {year_era}({year_ce}): no JSON array found")
+        tqdm.write(f"  [Parse failed] {year_era}({year_ce}): no JSON array found")
         _save_debug_raw(year_ce, raw)
         return []
 
     if not isinstance(records, list):
-        print(f"  [格式错误] {year_era}({year_ce}): 返回不是数组")
+        tqdm.write(f"  [格式错误] {year_era}({year_ce}): 返回不是数组")
         return []
 
     # 注入年号与公元年（确保一致）
@@ -465,19 +474,37 @@ def validate_record(raw: dict) -> Record | None:
 # ---------------------------------------------------------------------------
 # 进度持久化
 # ---------------------------------------------------------------------------
-def load_progress() -> set[int]:
+class Progress:
+    """进度数据，包含已完成年份和失败年份。"""
+
+    def __init__(self, done_years: set[int] | None = None, failed_years: dict[int, str] | None = None):
+        self.done_years: set[int] = done_years or set()
+        self.failed_years: dict[int, str] = failed_years or {}  # year_ce -> era_name
+
+
+def load_progress() -> Progress:
     if PROGRESS_FILE.exists():
         try:
             data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
-            return set(data.get("done_years", []))
+            return Progress(
+                done_years=set(data.get("done_years", [])),
+                failed_years={int(k): v for k, v in data.get("failed_years", {}).items()},
+            )
         except Exception:
             pass
-    return set()
+    return Progress()
 
 
-def save_progress(done_years: set[int]):
+def save_progress(progress: Progress):
     PROGRESS_FILE.write_text(
-        json.dumps({"done_years": sorted(done_years)}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "done_years": sorted(progress.done_years),
+                "failed_years": {str(k): v for k, v in sorted(progress.failed_years.items())},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -533,9 +560,13 @@ async def _process_one_year(
     content: str,
     seen_keys: set[tuple],
     output_csv: Path,
-) -> tuple[int, str, int]:
-    """处理单个年份，返回 (year_ce, year_era, valid_record_count)。"""
-    raw_records = await call_llm_extract(session, semaphore, era, ce, content)
+) -> tuple[int, str, int, bool]:
+    """处理单个年份，返回 (year_ce, year_era, valid_record_count, success)。"""
+    try:
+        raw_records = await call_llm_extract(session, semaphore, era, ce, content)
+    except LLMExtractError:
+        return ce, era, 0, False
+
     records = [r for r in (validate_record(r) for r in raw_records) if r is not None]
 
     # 去重并写入 CSV
@@ -549,7 +580,24 @@ async def _process_one_year(
     if new_records:
         write_csv(new_records, output_csv)
 
-    return ce, era, len(records)
+    return ce, era, len(records), True
+
+
+def remove_years_from_csv(years_to_remove: set[int], path: Path):
+    """从 CSV 中删除指定年份的所有记录，用于重试失败年份前去重。"""
+    if not path.exists() or not years_to_remove:
+        return
+    temp_path = path.with_suffix(".csv.tmp")
+    fieldnames = ["seq", "year_ce", "year_era", "province", "city", "county", "ancient_name", "source", "record", "note"]
+    with open(path, "r", encoding="utf-8-sig") as f_in, \
+         open(temp_path, "w", newline="", encoding="utf-8-sig") as f_out:
+        reader = csv.DictReader(f_in)
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in reader:
+            if int(row.get("year_ce", 0)) not in years_to_remove:
+                writer.writerow(row)
+    temp_path.replace(path)
 
 
 async def main():
@@ -559,6 +607,7 @@ async def main():
     parser.add_argument("--output", type=str, default=None, help="Custom output CSV path")
     parser.add_argument("--no-progress", action="store_true", help="Do not use progress file (test mode)")
     parser.add_argument("--restart", action="store_true", help="Reset progress and reprocess all years")
+    parser.add_argument("--retry-failed", action="store_true", help="Only reprocess years that previously failed")
     parser.add_argument("--workers", type=int, default=CONCURRENT_REQUESTS, help=f"Concurrent API requests (default: {CONCURRENT_REQUESTS})")
     args = parser.parse_args()
 
@@ -591,11 +640,23 @@ async def main():
     use_progress = not (args.no_progress or is_test_mode)
     progress_file = PROGRESS_FILE if use_progress else None
 
-    done_years = load_progress() if progress_file else set()
-    if done_years:
-        print(f"{len(done_years)} years already processed, will skip")
+    progress = load_progress() if progress_file else Progress()
+    if progress.done_years:
+        print(f"{len(progress.done_years)} years already processed, will skip")
+    if progress.failed_years:
+        print(f"{len(progress.failed_years)} years previously failed: {sorted(progress.failed_years.keys())}")
 
-    pending = [(era, ce, content) for era, ce, content in segments if ce not in done_years]
+    if args.retry_failed:
+        # 只重试之前失败的年份
+        if not progress.failed_years:
+            print("No failed years to retry")
+            return
+        # 先从 CSV 中删除这些年份的旧记录，避免重复
+        remove_years_from_csv(set(progress.failed_years.keys()), output_csv)
+        pending = [(era, ce, content) for era, ce, content in segments if ce in progress.failed_years]
+        print(f"Retrying {len(pending)} failed years")
+    else:
+        pending = [(era, ce, content) for era, ce, content in segments if ce not in progress.done_years]
 
     # 应用 offset 和 limit（在原始列表上切片，不受已处理年份影响）
     if args.offset:
@@ -615,6 +676,7 @@ async def main():
     semaphore = asyncio.Semaphore(workers)
     seen_keys: set[tuple] = set()
     completed_years: set[int] = set()
+    newly_failed: dict[int, str] = {}
 
     connector = aiohttp.TCPConnector(limit=workers)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -627,19 +689,28 @@ async def main():
         # 使用 as_completed 实现流水线：完成的任务立即处理，不等待同批其他任务
         pbar = tqdm(total=len(pending), desc="Processing years", unit="year")
         for coro in asyncio.as_completed(tasks):
-            ce, era, count = await coro
+            ce, era, count, success = await coro
             completed_years.add(ce)
-            tqdm.write(f"  [{ce}] {era} -> {count} records")
+            if success:
+                tqdm.write(f"  [{ce}] {era} -> {count} records")
+                # 成功后从失败列表中移除（如果有）
+                progress.failed_years.pop(ce, None)
+            else:
+                tqdm.write(f"  [{ce}] {era} -> FAILED")
+                newly_failed[ce] = era
+                progress.failed_years[ce] = era
             pbar.update(1)
 
             # 每完成 10 个年份保存一次进度（减少 IO 频率）
             if progress_file and len(completed_years) % 10 == 0:
-                save_progress(done_years | completed_years)
+                progress.done_years |= completed_years
+                save_progress(progress)
         pbar.close()
 
     # 最终保存进度
     if progress_file:
-        save_progress(done_years | completed_years)
+        progress.done_years |= completed_years
+        save_progress(progress)
 
     print(f"\nDone! Output file: {output_csv}")
 
@@ -651,8 +722,13 @@ async def main():
             total = sum(1 for _ in reader)
         print(f"Total records: {total}")
 
-    # 全部完成后清理进度文件
-    if progress_file and len(done_years | {ce for _, ce, _ in pending}) == len(segments):
+    if newly_failed:
+        print(f"Failed years this run: {sorted(newly_failed.keys())}")
+        print("Run with --retry-failed to reprocess them")
+
+    # 全部完成后清理进度文件（只有正常全量跑且没有失败时才清理）
+    all_years_done = len(progress.done_years | set(progress.failed_years.keys())) == len(segments)
+    if progress_file and not progress.failed_years and all_years_done:
         PROGRESS_FILE.unlink(missing_ok=True)
         print("Progress file cleaned up")
 
