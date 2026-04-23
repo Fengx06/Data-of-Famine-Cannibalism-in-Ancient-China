@@ -1,19 +1,18 @@
-#!/usr/bin/env python3
 """
-从校准版 Markdown 中提取明清时期灾荒食人记录到 CSV。
+Extract Ming-Qing famine cannibalism records from calibrated Markdown to CSV.
 
-用法:
+Usage:
     export LLM_API_KEY="your-api-key"
-    export LLM_BASE_URL="https://api.minimax.chat/v1"  # 或其他兼容 OpenAI 的 API
-    export LLM_MODEL="abab6.5s-chat"                    # 或其他模型
+    export LLM_BASE_URL="https://api.minimax.chat/v1"  # or other OpenAI-compatible API
+    export LLM_MODEL="abab6.5s-chat"                    # or other model
 
-    # 正式运行（全部 224 个年份）
+    # Full run (all 224 years)
     python extract_famine_data_llm.py
 
-    # 先测试 20 条看看效果
+    # Test with 20 years first
     python extract_famine_data_llm.py --limit 20 --no-progress
 
-    # 跳过前 10 条，再测试 20 条
+    # Skip first 10, then test 20
     python extract_famine_data_llm.py --offset 10 --limit 20 --no-progress
 """
 
@@ -30,6 +29,7 @@ from pathlib import Path
 
 import aiohttp
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 # 加载 .env 文件（从脚本目录向上查找）
 _SCRIPT_DIR = Path(__file__).parent
@@ -53,6 +53,7 @@ CONCURRENT_REQUESTS = 5           # 并发数
 REQUEST_TIMEOUT = 120             # 单次请求超时（秒）
 MAX_RETRIES = 3                   # 失败重试次数
 MAX_CONTENT_CHARS = 4000          # 单请求内容最大字符数，超长则拆分
+MAX_TOKENS = 16384                # LLM 输出 token 上限（需预留 think 推理空间）
 
 # CSV 写入锁（防止多进程/多实例并发写入导致行交错）
 _CSV_LOCK = threading.Lock()
@@ -77,7 +78,7 @@ class Record:
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """你是一个历史数据提取专家，负责从明清时期灾荒记录中提取食人相关事件。你的输出必须严格遵循给定的 JSON 格式。"""
+SYSTEM_PROMPT = """你是一个历史数据提取专家，负责从明清时期灾荒记录中提取食人相关事件。你的输出必须严格遵循给定的 JSON 格式。思考过程请尽量简短，将主要输出空间留给 JSON 结果。"""
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +198,7 @@ async def _call_llm_single(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 8192,
+        "max_tokens": MAX_TOKENS,
     }
 
     headers = {
@@ -207,6 +208,7 @@ async def _call_llm_single(
 
     url = f"{LLM_BASE_URL}/chat/completions"
 
+    last_raw = ""
     for attempt in range(1, MAX_RETRIES + 1):
         async with semaphore:
             try:
@@ -219,14 +221,46 @@ async def _call_llm_single(
                     resp.raise_for_status()
                     data = await resp.json()
                     raw = data["choices"][0]["message"]["content"]
-                    return parse_llm_response(raw, year_era, year_ce)
+                    last_raw = raw
+                    result = parse_llm_response(raw, year_era, year_ce)
+                    if result:
+                        return result
+                    # 解析为空但请求成功，继续重试
+                    continue
             except Exception as e:
-                print(f"  [重试 {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) 请求失败: {e}")
-                if attempt == MAX_RETRIES:
-                    print(f"  [跳过] {year_era}({year_ce}) 最终失败")
-                    return []
+                print(f"  [Retry {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) request failed: {e}")
+            if attempt < MAX_RETRIES:
                 await asyncio.sleep(2 ** attempt)
 
+    # 检查是否是 think 过程耗尽 token 导致无 JSON 输出
+    if _is_think_exhausted(last_raw):
+        print(f"  [Retry] {year_era}({year_ce}) think tokens exhausted, forcing JSON output...")
+        forced_payload = {
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": "你是一个历史数据提取专家。请直接输出 JSON 数组，不要输出思考过程。"},
+                {"role": "user", "content": prompt + "\n\n【强制要求】请直接输出 JSON 数组，不要输出任何思考过程或解释。"},
+            ],
+            "temperature": 0.0,
+            "max_tokens": MAX_TOKENS,
+        }
+        async with semaphore:
+            try:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    json=forced_payload,
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    raw = data["choices"][0]["message"]["content"]
+                    return parse_llm_response(raw, year_era, year_ce)
+            except Exception as e:
+                print(f"  [Skip] {year_era}({year_ce}) forced JSON request also failed: {e}")
+                return []
+
+    print(f"  [Skip] {year_era}({year_ce}) final failure")
     return []
 
 
@@ -263,7 +297,7 @@ async def call_llm_extract(
     if current_chunk:
         chunks.append(current_chunk)
 
-    print(f"  [{year_ce}] {year_era} 内容超长（{len(content)} 字符），拆分为 {len(chunks)} 次请求")
+    print(f"  [{year_ce}] {year_era} content too long ({len(content)} chars), split into {len(chunks)} requests")
 
     all_records: list[dict] = []
     for idx, chunk_lines in enumerate(chunks, 1):
@@ -272,7 +306,7 @@ async def call_llm_extract(
         header = f"【{year_era}（{year_ce}年）记录共 {len(chunks)} 部分，此为第 {idx} 部分】"
         records = await _call_llm_single(session, semaphore, year_era, year_ce, header + "\n" + chunk_content)
         all_records.extend(records)
-        print(f"    - 第 {idx}/{len(chunks)} 次请求 -> {len(records)} 条记录")
+        print(f"    - Part {idx}/{len(chunks)} -> {len(records)} records")
 
     return all_records
 
@@ -285,6 +319,14 @@ def _save_debug_raw(year_ce: int, raw: str) -> None:
     debug_dir = Path(__file__).parent / ".debug"
     debug_dir.mkdir(exist_ok=True)
     (debug_dir / f"{year_ce}_raw.txt").write_text(raw, encoding="utf-8")
+
+
+def _is_think_exhausted(raw: str) -> bool:
+    """检测 LLM 的 think 过程是否耗尽了 token，导致没有输出 JSON。"""
+    if "<think>" not in raw or "</think>" not in raw:
+        return False
+    after_think = raw[raw.find("</think>") + 8:].strip()
+    return not after_think
 
 
 def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
@@ -321,7 +363,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
                     rec["year_era"] = year_era
                     rec["year_ce"] = year_ce
             return records
-        print(f"  [格式错误] {year_era}({year_ce}): 返回不是数组")
+        print(f"  [Format error] {year_era}({year_ce}): response is not an array")
         return []
 
     # 尝试提取方括号包裹的内容
@@ -337,7 +379,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
             try:
                 records = json.loads(text[start:] + "]")
             except json.JSONDecodeError:
-                print(f"  [解析失败] {year_era}({year_ce}): JSON 截断且无法修复")
+                print(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
                 _save_debug_raw(year_ce, raw)
                 return []
     elif start != -1:
@@ -345,11 +387,11 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
         try:
             records = json.loads(text[start:] + "]")
         except json.JSONDecodeError:
-            print(f"  [解析失败] {year_era}({year_ce}): JSON 截断且无法修复")
+            print(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
             _save_debug_raw(year_ce, raw)
             return []
     else:
-        print(f"  [解析失败] {year_era}({year_ce}): 未找到 JSON 数组")
+        print(f"  [Parse failed] {year_era}({year_ce}): no JSON array found")
         _save_debug_raw(year_ce, raw)
         return []
 
@@ -473,29 +515,29 @@ def write_csv(records: list[Record], path: Path):
 # 主流程
 # ---------------------------------------------------------------------------
 async def main():
-    parser = argparse.ArgumentParser(description="从校准版 Markdown 中提取明清时期灾荒食人记录到 CSV")
-    parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 个年份（用于测试）")
-    parser.add_argument("--offset", type=int, default=0, help="跳过前 N 个年份后再开始处理")
-    parser.add_argument("--output", type=str, default=None, help="自定义输出 CSV 路径")
-    parser.add_argument("--no-progress", action="store_true", help="不使用进度文件（测试模式）")
-    parser.add_argument("--restart", action="store_true", help="重置进度，重新处理所有年份")
+    parser = argparse.ArgumentParser(description="Extract famine cannibalism records from calibrated Markdown to CSV")
+    parser.add_argument("--limit", type=int, default=None, help="Only process first N years (for testing)")
+    parser.add_argument("--offset", type=int, default=0, help="Skip first N years before processing")
+    parser.add_argument("--output", type=str, default=None, help="Custom output CSV path")
+    parser.add_argument("--no-progress", action="store_true", help="Do not use progress file (test mode)")
+    parser.add_argument("--restart", action="store_true", help="Reset progress and reprocess all years")
     args = parser.parse_args()
 
     if not INPUT_FILE.exists():
-        print(f"错误：输入文件不存在: {INPUT_FILE}")
+        print(f"Error: input file not found: {INPUT_FILE}")
         sys.exit(1)
 
     if not LLM_API_KEY:
-        print("错误：请设置环境变量 LLM_API_KEY")
+        print("Error: please set environment variable LLM_API_KEY")
         sys.exit(1)
 
     # 重置进度
     if args.restart and PROGRESS_FILE.exists():
         PROGRESS_FILE.unlink()
-        print("已重置进度文件")
+        print("Progress file reset")
 
     segments = extract_year_segments(INPUT_FILE)
-    print(f"共解析到 {len(segments)} 个年份分段")
+    print(f"Parsed {len(segments)} year segments")
 
     # 确定输出路径
     if args.output:
@@ -512,22 +554,22 @@ async def main():
 
     done_years = load_progress() if progress_file else set()
     if done_years:
-        print(f"已处理 {len(done_years)} 个年份，将跳过")
+        print(f"{len(done_years)} years already processed, will skip")
 
     pending = [(era, ce, content) for era, ce, content in segments if ce not in done_years]
 
     # 应用 offset 和 limit（在原始列表上切片，不受已处理年份影响）
     if args.offset:
         pending = pending[args.offset:]
-        print(f"跳过前 {args.offset} 个，剩余 {len(pending)} 个")
+        print(f"Skipped first {args.offset}, {len(pending)} remaining")
     if args.limit:
         pending = pending[:args.limit]
-        print(f"【测试模式】仅处理前 {args.limit} 个年份")
+        print(f"[Test mode] Processing only first {args.limit} years")
     else:
-        print(f"待处理 {len(pending)} 个年份")
+        print(f"Pending {len(pending)} years")
 
     if not pending:
-        print("所有年份已处理完毕")
+        print("All years processed")
         return
 
     semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
@@ -536,6 +578,7 @@ async def main():
 
     connector = aiohttp.TCPConnector(limit=CONCURRENT_REQUESTS)
     async with aiohttp.ClientSession(connector=connector) as session:
+        pbar = tqdm(total=len(pending), desc="Processing years", unit="year")
         for i in range(0, len(pending), CONCURRENT_REQUESTS):
             batch = pending[i : i + CONCURRENT_REQUESTS]
             tasks = [
@@ -555,7 +598,7 @@ async def main():
                         seen_keys.add(key)
                         batch_records.append(rec)
                 batch_years.add(ce)
-                print(f"  [{ce}] {era} -> {len(records)} 条记录")
+                tqdm.write(f"  [{ce}] {era} -> {len(records)} records")
 
             # 写入 CSV
             if batch_records:
@@ -567,7 +610,10 @@ async def main():
                 done_years.update(batch_years)
                 save_progress(done_years)
 
-    print(f"\n完成！输出文件: {output_csv}")
+            pbar.update(len(batch))
+        pbar.close()
+
+    print(f"\nDone! Output file: {output_csv}")
 
     # 最终统计
     if output_csv.exists():
@@ -575,12 +621,12 @@ async def main():
             reader = csv.reader(f)
             next(reader)  # skip header
             total = sum(1 for _ in reader)
-        print(f"总记录数: {total}")
+        print(f"Total records: {total}")
 
     # 全部完成后清理进度文件
     if progress_file and len(done_years) == len(segments):
         PROGRESS_FILE.unlink(missing_ok=True)
-        print("已清理进度文件")
+        print("Progress file cleaned up")
 
 
 if __name__ == "__main__":
