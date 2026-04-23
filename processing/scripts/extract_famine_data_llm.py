@@ -49,7 +49,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.minimax.chat/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "abab6.5s-chat")
 
-CONCURRENT_REQUESTS = 5           # 并发数
+CONCURRENT_REQUESTS = 5           # 默认并发数
 REQUEST_TIMEOUT = 120             # 单次请求超时（秒）
 MAX_RETRIES = 3                   # 失败重试次数
 MAX_CONTENT_CHARS = 4000          # 单请求内容最大字符数，超长则拆分
@@ -78,7 +78,9 @@ class Record:
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """你是一个历史数据提取专家，负责从明清时期灾荒记录中提取食人相关事件。你的输出必须严格遵循给定的 JSON 格式。思考过程请尽量简短，将主要输出空间留给 JSON 结果。"""
+SYSTEM_PROMPT = """你是一个历史数据提取专家，负责从明清时期灾荒记录中提取食人相关事件。你的输出必须严格遵循给定的 JSON 格式。思考过程请尽量简短，将主要输出空间留给 JSON 结果。
+
+重要：在构造 JSON 时，若原始记录中包含双引号（" 或 " 或 "），请在 JSON 的 record 字段中将其替换为单引号（'），以确保 JSON 格式合法。"""
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +129,7 @@ USER_PROMPT_TEMPLATE = """请从以下 {year_era}（{year_ce}年）的灾荒记�
 - 只输出 JSON 数组，不要任何其他文字、解释、markdown 代码块标记
 - year_ce 必须是整数数字
 - 无食人记录的年份返回 `[]`
+- record 字段中若原文包含双引号（" 或 " 或 "），请替换为单引号（'），确保 JSON 格式合法
 
 ---
 
@@ -181,6 +184,13 @@ def extract_year_segments(md_path: Path) -> list[tuple[str, int, str]]:
 # ---------------------------------------------------------------------------
 # LLM 调用
 # ---------------------------------------------------------------------------
+def _sanitize_quotes(text: str) -> str:
+    """将内容中的各类双引号替换为单引号，避免 LLM 生成的 JSON 中出现未转义引号。
+    同时处理 ASCII 双引号 (U+0022) 和中文双引号 (U+201C/U+201D)。
+    """
+    return text.replace('"', "'").replace('"', "'").replace('"', "'")
+
+
 async def _call_llm_single(
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
@@ -189,7 +199,8 @@ async def _call_llm_single(
     content: str,
 ) -> list[dict]:
     """单次 LLM 调用。"""
-    prompt = USER_PROMPT_TEMPLATE.replace("{year_era}", year_era).replace("{year_ce}", str(year_ce)).replace("{content}", content)
+    safe_content = _sanitize_quotes(content)
+    prompt = USER_PROMPT_TEMPLATE.replace("{year_era}", year_era).replace("{year_ce}", str(year_ce)).replace("{content}", safe_content)
 
     payload = {
         "model": LLM_MODEL,
@@ -514,6 +525,33 @@ def write_csv(records: list[Record], path: Path):
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
+async def _process_one_year(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+    era: str,
+    ce: int,
+    content: str,
+    seen_keys: set[tuple],
+    output_csv: Path,
+) -> tuple[int, str, int]:
+    """处理单个年份，返回 (year_ce, year_era, valid_record_count)。"""
+    raw_records = await call_llm_extract(session, semaphore, era, ce, content)
+    records = [r for r in (validate_record(r) for r in raw_records) if r is not None]
+
+    # 去重并写入 CSV
+    new_records: list[Record] = []
+    for rec in records:
+        key = (rec.province, rec.city, rec.county, rec.year_ce, rec.source, rec.note, rec.record)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            new_records.append(rec)
+
+    if new_records:
+        write_csv(new_records, output_csv)
+
+    return ce, era, len(records)
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Extract famine cannibalism records from calibrated Markdown to CSV")
     parser.add_argument("--limit", type=int, default=None, help="Only process first N years (for testing)")
@@ -521,6 +559,7 @@ async def main():
     parser.add_argument("--output", type=str, default=None, help="Custom output CSV path")
     parser.add_argument("--no-progress", action="store_true", help="Do not use progress file (test mode)")
     parser.add_argument("--restart", action="store_true", help="Reset progress and reprocess all years")
+    parser.add_argument("--workers", type=int, default=CONCURRENT_REQUESTS, help=f"Concurrent API requests (default: {CONCURRENT_REQUESTS})")
     args = parser.parse_args()
 
     if not INPUT_FILE.exists():
@@ -572,46 +611,35 @@ async def main():
         print("All years processed")
         return
 
-    semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
-    all_records: list[Record] = []
+    workers = args.workers
+    semaphore = asyncio.Semaphore(workers)
     seen_keys: set[tuple] = set()
+    completed_years: set[int] = set()
 
-    connector = aiohttp.TCPConnector(limit=CONCURRENT_REQUESTS)
+    connector = aiohttp.TCPConnector(limit=workers)
     async with aiohttp.ClientSession(connector=connector) as session:
+        # 创建所有任务，用 semaphore 控制并发
+        tasks = [
+            _process_one_year(session, semaphore, era, ce, content, seen_keys, output_csv)
+            for era, ce, content in pending
+        ]
+
+        # 使用 as_completed 实现流水线：完成的任务立即处理，不等待同批其他任务
         pbar = tqdm(total=len(pending), desc="Processing years", unit="year")
-        for i in range(0, len(pending), CONCURRENT_REQUESTS):
-            batch = pending[i : i + CONCURRENT_REQUESTS]
-            tasks = [
-                call_llm_extract(session, semaphore, era, ce, content)
-                for era, ce, content in batch
-            ]
-            results = await asyncio.gather(*tasks)
+        for coro in asyncio.as_completed(tasks):
+            ce, era, count = await coro
+            completed_years.add(ce)
+            tqdm.write(f"  [{ce}] {era} -> {count} records")
+            pbar.update(1)
 
-            batch_records: list[Record] = []
-            batch_years: set[int] = set()
-            for (era, ce, _), raw_records in zip(batch, results):
-                records = [r for r in (validate_record(r) for r in raw_records) if r is not None]
-                # 批次内去重
-                for rec in records:
-                    key = (rec.province, rec.city, rec.county, rec.year_ce, rec.source, rec.note, rec.record)
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        batch_records.append(rec)
-                batch_years.add(ce)
-                tqdm.write(f"  [{ce}] {era} -> {len(records)} records")
-
-            # 写入 CSV
-            if batch_records:
-                write_csv(batch_records, output_csv)
-                all_records.extend(batch_records)
-
-            # CSV 写入成功后再保存进度，避免进度领先于 CSV
-            if progress_file:
-                done_years.update(batch_years)
-                save_progress(done_years)
-
-            pbar.update(len(batch))
+            # 每完成 10 个年份保存一次进度（减少 IO 频率）
+            if progress_file and len(completed_years) % 10 == 0:
+                save_progress(done_years | completed_years)
         pbar.close()
+
+    # 最终保存进度
+    if progress_file:
+        save_progress(done_years | completed_years)
 
     print(f"\nDone! Output file: {output_csv}")
 
@@ -624,7 +652,7 @@ async def main():
         print(f"Total records: {total}")
 
     # 全部完成后清理进度文件
-    if progress_file and len(done_years) == len(segments):
+    if progress_file and len(done_years | {ce for _, ce, _ in pending}) == len(segments):
         PROGRESS_FILE.unlink(missing_ok=True)
         print("Progress file cleaned up")
 
