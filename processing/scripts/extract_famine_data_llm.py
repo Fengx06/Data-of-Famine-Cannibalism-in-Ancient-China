@@ -23,6 +23,11 @@ import json
 import os
 import re
 import sys
+
+# 修复 Windows 终端中文乱码
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -317,16 +322,13 @@ async def call_llm_extract(
     if current_chunk:
         chunks.append(current_chunk)
 
-    tqdm.write(f"  [{year_ce}] {year_era} content too long ({len(content)} chars), split into {len(chunks)} requests")
-
+    # 内容超长拆分，静默处理不打扰进度条
     all_records: list[dict] = []
     for idx, chunk_lines in enumerate(chunks, 1):
         chunk_content = "\n".join(chunk_lines)
-        # 标注这是第几部分，帮助 LLM 理解上下文边界
         header = f"【{year_era}（{year_ce}年）记录共 {len(chunks)} 部分，此为第 {idx} 部分】"
         records = await _call_llm_single(session, semaphore, year_era, year_ce, header + "\n" + chunk_content)
         all_records.extend(records)
-        tqdm.write(f"    - Part {idx}/{len(chunks)} -> {len(records)} records")
 
     return all_records
 
@@ -519,7 +521,8 @@ def write_csv(records: list[Record], path: Path):
     with _CSV_LOCK:
         # 计算已有记录数，用于序号续编
         existing_rows = 0
-        if path.exists() and path.stat().st_size > 0:
+        has_data = path.exists() and path.stat().st_size > 0
+        if has_data:
             with open(path, "r", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
                 try:
@@ -528,7 +531,7 @@ def write_csv(records: list[Record], path: Path):
                     pass
                 existing_rows = sum(1 for _ in reader)
 
-        need_header = not path.exists() or path.stat().st_size == 0
+        need_header = not has_data
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if need_header:
@@ -688,17 +691,24 @@ async def main():
 
         # 使用 as_completed 实现流水线：完成的任务立即处理，不等待同批其他任务
         pbar = tqdm(total=len(pending), desc="Processing years", unit="year")
+        year_results: list[tuple[int, str, int, bool]] = []  # 收集结果用于最终汇总
+        success_count = 0
+        fail_count = 0
         for coro in asyncio.as_completed(tasks):
             ce, era, count, success = await coro
             completed_years.add(ce)
+            year_results.append((ce, era, count, success))
             if success:
-                tqdm.write(f"  [{ce}] {era} -> {count} records")
-                # 成功后从失败列表中移除（如果有）
+                success_count += 1
                 progress.failed_years.pop(ce, None)
+                # 用 postfix 实时显示最新完成的年份，不打断进度条
+                pbar.set_postfix_str(f"[{ce}] {era}={count}  ok={success_count} fail={fail_count}")
             else:
-                tqdm.write(f"  [{ce}] {era} -> FAILED")
+                fail_count += 1
                 newly_failed[ce] = era
                 progress.failed_years[ce] = era
+                # 失败信息仍然用 write 输出，确保用户能看到
+                tqdm.write(f"  [{ce}] {era} -> FAILED")
             pbar.update(1)
 
             # 每完成 10 个年份保存一次进度（减少 IO 频率）
@@ -714,23 +724,70 @@ async def main():
 
     print(f"\nDone! Output file: {output_csv}")
 
+    # 年份汇总（只显示有记录或失败的年份，方便快速核对）
+    if year_results:
+        year_results.sort(key=lambda x: x[0])
+        summary_parts = []
+        for ce, era, count, success in year_results:
+            if not success:
+                summary_parts.append(f"[{ce}] {era} -> FAILED")
+            elif count > 0:
+                summary_parts.append(f"[{ce}] {era} -> {count} records")
+        if summary_parts:
+            print("\nYear summary:")
+            for part in summary_parts:
+                print(f"  {part}")
+
     # 最终统计
     if output_csv.exists():
         with open(output_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             next(reader)  # skip header
             total = sum(1 for _ in reader)
-        print(f"Total records: {total}")
+        print(f"\nTotal records: {total}")
 
     if newly_failed:
         print(f"Failed years this run: {sorted(newly_failed.keys())}")
         print("Run with --retry-failed to reprocess them")
+
+    # 按年份排序并重写 CSV
+    sort_csv_by_year(output_csv)
 
     # 全部完成后清理进度文件（只有正常全量跑且没有失败时才清理）
     all_years_done = len(progress.done_years | set(progress.failed_years.keys())) == len(segments)
     if progress_file and not progress.failed_years and all_years_done:
         PROGRESS_FILE.unlink(missing_ok=True)
         print("Progress file cleaned up")
+
+
+def sort_csv_by_year(path: Path):
+    """按 year_ce 排序并重写 CSV，同时重新编号 seq。"""
+    if not path.exists():
+        return
+
+    fieldnames = ["seq", "year_ce", "year_era", "province", "city", "county",
+                  "ancient_name", "source", "record", "note"]
+
+    with open(path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if not rows:
+        return
+
+    # 按 year_ce 排序
+    rows.sort(key=lambda r: int(r.get("year_ce", 0)))
+
+    # 重新编号
+    for i, row in enumerate(rows, 1):
+        row["seq"] = i
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"CSV sorted by year: {path}")
 
 
 if __name__ == "__main__":
