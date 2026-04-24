@@ -8,6 +8,11 @@ import json
 import os
 import re
 import sys
+
+# 修复 Windows 终端中文乱码
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 from dataclasses import dataclass
 from pathlib import Path
 
