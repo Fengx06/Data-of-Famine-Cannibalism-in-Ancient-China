@@ -569,25 +569,16 @@ def write_csv(records: list[Record], path: Path):
 
     with _CSV_LOCK:
         # 计算已有记录数，用于序号续编
-        existing_rows = 0
         has_data = path.exists() and path.stat().st_size > 0
-        if has_data:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                try:
-                    next(reader)  # skip header
-                except StopIteration:
-                    pass
-                existing_rows = sum(1 for _ in reader)
-
         need_header = not has_data
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if need_header:
                 writer.writeheader()
-            for i, rec in enumerate(records, existing_rows + 1):
+            for rec in records:
                 row = {
-                    "seq": i,
+                    # Renumber seq later in sort_csv_by_year().
+                    "seq": "",
                     "year_ce": rec.year_ce,
                     "year_era": rec.year_era,
                     "province": rec.province,
@@ -776,6 +767,7 @@ async def main():
 
     # 最终保存进度
     if progress_file:
+        print("Saving final progress...")
         progress.done_years |= completed_years
         save_progress(progress)
 
@@ -797,6 +789,7 @@ async def main():
 
     # 最终统计
     if output_csv.exists():
+        print("Counting total records...")
         with open(output_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             next(reader)  # skip header
@@ -808,6 +801,7 @@ async def main():
         print("Run with --retry-failed to reprocess them")
 
     # 按年份排序并重写 CSV
+    print("Sorting and rewriting CSV...")
     sort_csv_by_year(output_csv)
 
     # 全部完成后清理进度文件（只有正常全量跑且没有失败时才清理）
