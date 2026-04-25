@@ -42,6 +42,31 @@ def normalize_record(text):
     return text
 
 
+def normalize_record_for_compare(text):
+    """Build a compact record key for subset-style duplicate checks."""
+    text = strip_leading_record_label(text)
+    text = re.sub(r"^[0-9一二三四五六七八九十〇零]{2,4}年[，,]?", "", text)
+    text = re.sub(r"^[^，,：:]+[，,：:]", "", text)
+    text = re.sub(r"[（(][^）)]*[）)]", "", text)
+    text = re.sub(r"[0-9一二三四五六七八九十〇零]{2,4}年", "", text)
+    return re.sub(r"[\s。．.，,；;：:、\"'“”‘’＂＇]+", "", text)
+
+
+def normalize_source_for_compare(text):
+    text = "" if pd.isna(text) else str(text).strip()
+    if not text or text == "无":
+        return ""
+    return re.sub(r"[\s《》〈〉\"'“”‘’＂＇，,。．.；;：:、]+", "", text)
+
+
+def sources_are_compatible(source1, source2):
+    src1 = normalize_source_for_compare(source1)
+    src2 = normalize_source_for_compare(source2)
+    if not src1 or not src2:
+        return False
+    return src1 in src2 or src2 in src1
+
+
 def normalize_region_name(name):
     """Normalize only common administrative suffixes, avoiding loose substring matching."""
     text = "" if pd.isna(name) else str(name).strip()
@@ -168,7 +193,7 @@ def get_record_core(record):
     text = strip_leading_record_label(record)
     text = re.sub(r"^[0-9一二三四五六七八九十〇零]{2,4}年[，,]?", "", text)
     text = re.sub(r"^[^，,：:]+[，,：:]", "", text)
-    return text.strip()
+    return text.strip().strip("。．.，,；; ")
 
 
 def record_mentions_location(record, location):
@@ -210,7 +235,14 @@ def records_are_related(record1, record2):
         return False
     if core1 == core2:
         return True
-    return core1 in core2 or core2 in core1
+    if core1 in core2 or core2 in core1:
+        return True
+
+    compact1 = normalize_record_for_compare(record1)
+    compact2 = normalize_record_for_compare(record2)
+    if not compact1 or not compact2:
+        return False
+    return compact1 in compact2 or compact2 in compact1
 
 
 def is_multi_location_cluster(group):
@@ -358,6 +390,81 @@ def deduplicate_by_record_group(result_df):
     if drop_indices:
         result_df = result_df.drop(sorted(set(drop_indices)))
     return result_df.drop(columns=["_record_norm"], errors="ignore")
+
+
+def record_subset_merge_location(row):
+    return get_min_location(row) or normalize_region_name(row.get("ancient_name", ""))
+
+
+def deduplicate_related_record_subsets(result_df):
+    result_df = result_df.copy()
+    drop_indices = []
+
+    grouped = result_df.groupby(["year_ce", "province"], dropna=False)
+    for _, group in grouped:
+        if len(group) <= 1:
+            continue
+
+        indices = group.index.tolist()
+        parent = {idx: idx for idx in indices}
+
+        def find(idx):
+            root = idx
+            while parent[root] != root:
+                root = parent[root]
+            while parent[idx] != idx:
+                next_idx = parent[idx]
+                parent[idx] = root
+                idx = next_idx
+            return root
+
+        def union(a, b):
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i in range(len(indices)):
+            for j in range(i + 1, len(indices)):
+                idx_i = indices[i]
+                idx_j = indices[j]
+                if not sources_are_compatible(result_df.loc[idx_i, "source"], result_df.loc[idx_j, "source"]):
+                    continue
+                if records_are_related(result_df.loc[idx_i, "record"], result_df.loc[idx_j, "record"]):
+                    union(idx_i, idx_j)
+
+        clusters = {}
+        for idx in indices:
+            clusters.setdefault(find(idx), []).append(idx)
+
+        for cluster_indices in clusters.values():
+            if len(cluster_indices) <= 1:
+                continue
+
+            merge_groups = [cluster_indices]
+            cluster = result_df.loc[cluster_indices]
+            if is_multi_location_cluster(cluster):
+                by_location = {}
+                for idx in cluster_indices:
+                    loc = record_subset_merge_location(result_df.loc[idx])
+                    if not loc:
+                        continue
+                    by_location.setdefault(loc, []).append(idx)
+                merge_groups = list(by_location.values())
+
+            for merge_indices in merge_groups:
+                if len(merge_indices) <= 1:
+                    continue
+
+                keep_idx = choose_best_keep_idx(result_df, merge_indices)
+                merged_sources = merge_sources(result_df.loc[merge_indices, "来源版本"])
+                result_df.loc[keep_idx, "来源版本"] = merged_sources
+                mark_as_processed(result_df, keep_idx, "record子集合并")
+                drop_indices.extend(idx for idx in merge_indices if idx != keep_idx)
+
+    if drop_indices:
+        result_df = result_df.drop(sorted(set(drop_indices)))
+    return result_df
 
 
 def deduplicate_empty_city_by_source(result_df):
@@ -528,7 +635,7 @@ def deduplicate_empty_county_variants(result_df):
 
             county_empty = [
                 idx for idx in cluster_indices
-                if is_blank(result_df.loc[idx, "county"])
+                if is_blank(result_df.loc[idx, "county"]) and not row_supported_tokens(result_df.loc[idx])
             ]
             county_non_empty = [
                 idx for idx in cluster_indices
@@ -770,6 +877,57 @@ def deduplicate_prefer_modern_county(result_df):
     return result_df
 
 
+def deduplicate_modern_city_county_over_ancient(result_df):
+    result_df = result_df.copy()
+    drop_indices = []
+
+    grouped = result_df.groupby(["year_ce", "province", "source"], dropna=False)
+    for _, group in grouped:
+        if len(group) <= 1:
+            continue
+
+        indices = group.index.tolist()
+        for keep_idx in indices:
+            keep_row = result_df.loc[keep_idx]
+            keep_city = "" if is_blank(keep_row["city"]) else normalize_region_name(keep_row["city"])
+            keep_county = "" if is_blank(keep_row["county"]) else normalize_region_name(keep_row["county"])
+            keep_ancient = "" if is_blank(keep_row["ancient_name"]) else normalize_region_name(keep_row["ancient_name"])
+
+            # Modern-style target: city is present, county is present, and ancient_name is blank.
+            if not keep_city or not keep_county or keep_ancient:
+                continue
+
+            for drop_idx in indices:
+                if drop_idx == keep_idx or drop_idx in drop_indices:
+                    continue
+
+                drop_row = result_df.loc[drop_idx]
+                drop_city = "" if is_blank(drop_row["city"]) else normalize_region_name(drop_row["city"])
+                drop_county = "" if is_blank(drop_row["county"]) else normalize_region_name(drop_row["county"])
+                drop_ancient = "" if is_blank(drop_row["ancient_name"]) else normalize_region_name(drop_row["ancient_name"])
+
+                if drop_city != keep_city:
+                    continue
+                if not drop_county or not drop_ancient:
+                    continue
+                if drop_county != drop_ancient:
+                    continue
+
+                keep_record = normalize_record(keep_row["record"])
+                drop_record = normalize_record(drop_row["record"])
+                if not records_are_related(keep_record, drop_record):
+                    continue
+
+                merged_sources = merge_sources(result_df.loc[[keep_idx, drop_idx], "来源版本"])
+                result_df.loc[keep_idx, "来源版本"] = merged_sources
+                mark_as_processed(result_df, keep_idx, "同city下保留现代county")
+                drop_indices.append(drop_idx)
+
+    if drop_indices:
+        result_df = result_df.drop(sorted(set(drop_indices)))
+    return result_df
+
+
 def deduplicate_related_records_by_version_count(result_df):
     result_df = result_df.copy()
     drop_indices = []
@@ -958,6 +1116,7 @@ def consolidate_versions():
 
     result_df = build_initial_result_rows(df)
     result_df = deduplicate_by_record_group(result_df)
+    result_df = deduplicate_related_record_subsets(result_df)
     result_df = deduplicate_empty_city_by_source(result_df)
     result_df = deduplicate_exact_location_by_source(result_df)
     result_df = deduplicate_same_county_city_variants(result_df)
@@ -967,6 +1126,7 @@ def consolidate_versions():
     result_df = deduplicate_multi_location_supported_tokens(result_df)
     result_df = deduplicate_ancient_modern_mapping_pairs(result_df)
     result_df = deduplicate_prefer_modern_county(result_df)
+    result_df = deduplicate_modern_city_county_over_ancient(result_df)
     result_df = deduplicate_related_records_by_version_count(result_df)
     result_df = reset_seq(result_df)
     result_df, review_df = collect_suspicious_rows(result_df)
