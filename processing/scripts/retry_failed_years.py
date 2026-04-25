@@ -426,8 +426,9 @@ async def main():
 
         all_rows.sort(key=lambda r: (int(r["year_ce"]), int(r["seq"])))
 
+        fieldnames = reader.fieldnames or []
         with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for i, row in enumerate(all_rows, 1):
                 row["seq"] = i

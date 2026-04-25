@@ -433,6 +433,51 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 # 记录验证与清洗
 # ---------------------------------------------------------------------------
+def restore_record_from_source(record: str, content: str) -> str:
+    """
+    根据 LLM 返回的 record，在原始 content 中查找匹配的完整原文行。
+
+    LLM 有时会省略 record 开头的地名前缀（如把"临汝县：大饥..."只返回"大饥..."），
+    此函数通过核心内容匹配，从原始文本中找回完整的一行。
+    """
+    record = record.strip()
+    if not record or record == "无":
+        return record
+
+    # 如果已经有"地名："前缀格式，认为已经完整
+    if re.match(r"^[^：:\s]{1,15}[：:]", record):
+        return record
+
+    # 提取关键词：连续 2 个以上的中文字符
+    keywords = re.findall(r"[一-鿿]{2,}", record)
+    if not keywords:
+        return record
+
+    # 按长度排序，优先用长的
+    keywords = sorted(set(keywords), key=len, reverse=True)
+
+    lines = [l.strip() for l in content.splitlines() if l.strip()]
+
+    # 优先用 >=3 字的关键词匹配，降低误匹配概率
+    for min_len in (3, 2):
+        for keyword in [k for k in keywords if len(k) >= min_len]:
+            matches = [l for l in lines if keyword in l]
+            if not matches:
+                continue
+            if len(matches) == 1:
+                return matches[0]
+            # 多个匹配时，尝试用更多关键词进一步过滤
+            for kw2 in keywords:
+                if kw2 != keyword and len(kw2) >= 2:
+                    filtered = [l for l in matches if kw2 in l]
+                    if len(filtered) == 1:
+                        return filtered[0]
+            # 仍有多个，返回最长的（通常包含完整前缀和来源）
+            return max(matches, key=len)
+
+    return record
+
+
 def validate_record(raw: dict) -> Record | None:
     """
     验证字段并填充默认值，返回 Record 或 None（无效记录）。
@@ -569,6 +614,14 @@ async def _process_one_year(
         raw_records = await call_llm_extract(session, semaphore, era, ce, content)
     except LLMExtractError:
         return ce, era, 0, False
+
+    # 从原始内容中补全可能被 LLM 省略前缀的 record
+    for rec in raw_records:
+        if isinstance(rec, dict):
+            original = rec.get("record", "")
+            restored = restore_record_from_source(original, content)
+            if restored != original:
+                rec["record"] = restored
 
     records = [r for r in (validate_record(r) for r in raw_records) if r is not None]
 
