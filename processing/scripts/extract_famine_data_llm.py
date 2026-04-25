@@ -323,6 +323,34 @@ YEAR_PATTERN = re.compile(
 )
 
 
+def format_seconds(seconds: float) -> str:
+    return f"{seconds:.1f}s"
+
+
+def summarize_year_timing(timing: YearTiming) -> str:
+    summary = [
+        f"t={format_seconds(timing.total_seconds)}",
+        f"chunks={timing.chunk_count}",
+    ]
+    if timing.total_retries:
+        summary.append(f"retries={timing.total_retries}")
+    if timing.total_parse_failures:
+        summary.append(f"parse_fail={timing.total_parse_failures}")
+    if timing.forced_json_used:
+        summary.append("forced_json=1")
+    return " ".join(summary)
+
+
+def should_log_year_timing(timing: YearTiming) -> bool:
+    return (
+        timing.total_seconds >= 15
+        or timing.chunk_count > 1
+        or timing.total_retries > 0
+        or timing.total_parse_failures > 0
+        or timing.forced_json_used
+    )
+
+
 def extract_year_segments(md_path: Path) -> list[tuple[str, int, str]]:
     """
     按 ### 标题分段，返回 [(年号, 公元年, 内容)]
@@ -377,6 +405,7 @@ async def _call_llm_single(
     year_ce: int,
     content: str,
     debug_dir: Path | None = None,
+    timing: RequestTiming | None = None,
 ) -> list[dict]:
     """单次 LLM 调用。"""
     safe_content = _sanitize_quotes(content)
@@ -401,8 +430,11 @@ async def _call_llm_single(
 
     last_raw = ""
     for attempt in range(1, MAX_RETRIES + 1):
+        if timing:
+            timing.attempts += 1
         async with semaphore:
             try:
+                request_started = time.perf_counter()
                 async with session.post(
                     url,
                     headers=headers,
@@ -411,6 +443,8 @@ async def _call_llm_single(
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
+                    if timing:
+                        timing.request_seconds += time.perf_counter() - request_started
                     raw = data["choices"][0]["message"]["content"]
                     last_raw = raw
                     result = parse_llm_response(raw, year_era, year_ce)
@@ -427,16 +461,23 @@ async def _call_llm_single(
                         )
                     if result is not None:
                         return result
+                    if timing:
+                        timing.parse_failures += 1
                     # 解析失败时重试；空数组 [] 也是合法结果
                     continue
             except Exception as e:
                 tqdm.write(f"  [Retry {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) request failed: {e}")
             if attempt < MAX_RETRIES:
-                await asyncio.sleep(2 ** attempt)
+                sleep_seconds = 2 ** attempt
+                if timing:
+                    timing.retry_sleep_seconds += sleep_seconds
+                await asyncio.sleep(sleep_seconds)
 
     # 检查是否是 think 过程耗尽 token 导致无 JSON 输出
     if _is_think_exhausted(last_raw):
         tqdm.write(f"  [Retry] {year_era}({year_ce}) think tokens exhausted, forcing JSON output...")
+        if timing:
+            timing.forced_json_used = True
         forced_payload = {
             "model": LLM_MODEL,
             "messages": [
@@ -448,6 +489,7 @@ async def _call_llm_single(
         }
         async with semaphore:
             try:
+                forced_started = time.perf_counter()
                 async with session.post(
                     url,
                     headers=headers,
@@ -456,8 +498,12 @@ async def _call_llm_single(
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
+                    if timing:
+                        timing.forced_json_seconds += time.perf_counter() - forced_started
                     raw = data["choices"][0]["message"]["content"]
                     result = parse_llm_response(raw, year_era, year_ce)
+                    if timing and result is not None:
+                        timing.forced_json_success = True
                     if debug_dir:
                         save_debug_bundle(
                             LLMDebugBundle(
@@ -486,13 +532,28 @@ async def call_llm_extract(
     year_ce: int,
     content: str,
     debug_dir: Path | None = None,
+    timing: YearTiming | None = None,
 ) -> list[dict]:
     """
     调用 LLM API 提取单年份的食人记录。
     若内容超长，按行拆分为多个 chunk 分别调用，最后合并结果。
     """
     if len(content) <= MAX_CONTENT_CHARS:
-        return await _call_llm_single(session, semaphore, year_era, year_ce, content, debug_dir=debug_dir)
+        chunk_timing = ChunkTiming(index=1, content_chars=len(content))
+        if timing:
+            timing.chunk_timings.append(chunk_timing)
+        chunk_started = time.perf_counter()
+        records = await _call_llm_single(
+            session,
+            semaphore,
+            year_era,
+            year_ce,
+            content,
+            debug_dir=debug_dir,
+            timing=chunk_timing.request_timing,
+        )
+        chunk_timing.elapsed_seconds = time.perf_counter() - chunk_started
+        return records
 
     # 按行拆分，保持行完整性
     lines = content.splitlines()
@@ -521,6 +582,10 @@ async def call_llm_extract(
         chunk_debug_dir = None
         if debug_dir:
             chunk_debug_dir = debug_dir / f"{year_ce}_chunk_{idx}"
+        chunk_timing = ChunkTiming(index=idx, content_chars=len(chunk_content))
+        if timing:
+            timing.chunk_timings.append(chunk_timing)
+        chunk_started = time.perf_counter()
         records = await _call_llm_single(
             session,
             semaphore,
@@ -528,7 +593,9 @@ async def call_llm_extract(
             year_ce,
             header + "\n" + chunk_content,
             debug_dir=chunk_debug_dir,
+            timing=chunk_timing.request_timing,
         )
+        chunk_timing.elapsed_seconds = time.perf_counter() - chunk_started
         all_records.extend(records)
 
     return all_records
@@ -870,12 +937,23 @@ async def _process_one_year(
     seen_keys: set[tuple],
     output_csv: Path,
     debug_dir: Path | None = None,
-) -> tuple[int, str, int, bool]:
+) -> tuple[int, str, int, bool, YearTiming]:
     """处理单个年份，返回 (year_ce, year_era, valid_record_count, success)。"""
+    year_timing = YearTiming(year_ce=ce, year_era=era)
+    year_started = time.perf_counter()
     try:
-        raw_records = await call_llm_extract(session, semaphore, era, ce, content, debug_dir=debug_dir)
+        raw_records = await call_llm_extract(
+            session,
+            semaphore,
+            era,
+            ce,
+            content,
+            debug_dir=debug_dir,
+            timing=year_timing,
+        )
     except LLMExtractError:
-        return ce, era, 0, False
+        year_timing.total_seconds = time.perf_counter() - year_started
+        return ce, era, 0, False, year_timing
 
     # 从原始内容中补全可能被 LLM 省略前缀的 record
     for rec in raw_records:
@@ -884,8 +962,10 @@ async def _process_one_year(
             restored = restore_record_from_source(original, content)
             if restored != original:
                 rec["record"] = restored
+                year_timing.restored_records += 1
 
     records = [r for r in (validate_record(r) for r in raw_records) if r is not None]
+    year_timing.valid_records = len(records)
 
     # 去重并写入 CSV
     new_records: list[Record] = []
@@ -897,8 +977,10 @@ async def _process_one_year(
 
     if new_records:
         write_csv(new_records, output_csv)
+    year_timing.written_records = len(new_records)
+    year_timing.total_seconds = time.perf_counter() - year_started
 
-    return ce, era, len(records), True
+    return ce, era, len(records), True, year_timing
 
 
 def remove_years_from_csv(years_to_remove: set[int], path: Path):
@@ -929,6 +1011,7 @@ async def main():
     parser.add_argument("--workers", type=int, default=CONCURRENT_REQUESTS, help=f"Concurrent API requests (default: {CONCURRENT_REQUESTS})")
     parser.add_argument("--sample-years", type=str, default=None, help="Comma-separated CE years to process, e.g. 1644,1877")
     parser.add_argument("--debug-sample", action="store_true", help="Save prompt/raw/parsed outputs for sampled years under processing/scripts/.debug")
+    parser.add_argument("--verbose-timing", action="store_true", help="Print detailed per-year and per-chunk timing diagnostics")
     args = parser.parse_args()
 
     if not INPUT_FILE.exists():
@@ -1009,6 +1092,8 @@ async def main():
     seen_keys: set[tuple] = set()
     successful_years: set[int] = set()
     newly_failed: dict[int, str] = {}
+    year_timings: list[YearTiming] = []
+    saved_success_checkpoint = 0
 
     connector = aiohttp.TCPConnector(limit=workers)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -1033,33 +1118,55 @@ async def main():
         success_count = 0
         fail_count = 0
         for coro in asyncio.as_completed(tasks):
-            ce, era, count, success = await coro
+            ce, era, count, success, year_timing = await coro
+            year_timings.append(year_timing)
             year_results.append((ce, era, count, success))
             if success:
                 successful_years.add(ce)
                 success_count += 1
                 progress.failed_years.pop(ce, None)
                 # 用 postfix 实时显示最新完成的年份，不打断进度条
-                pbar.set_postfix_str(f"[{ce}] {era}={count}  ok={success_count} fail={fail_count}")
+                pbar.set_postfix_str(
+                    f"[{ce}] {era}={count} {summarize_year_timing(year_timing)} ok={success_count} fail={fail_count}"
+                )
+                if args.verbose_timing or should_log_year_timing(year_timing):
+                    tqdm.write(
+                        f"  [Timing] [{ce}] {era} ok records={count} "
+                        f"written={year_timing.written_records} restored={year_timing.restored_records} "
+                        f"{summarize_year_timing(year_timing)}"
+                    )
+                    if args.verbose_timing:
+                        for chunk in year_timing.chunk_timings:
+                            tqdm.write(
+                                f"    chunk {chunk.index}/{year_timing.chunk_count}: chars={chunk.content_chars} "
+                                f"elapsed={format_seconds(chunk.elapsed_seconds)} "
+                                f"requests={chunk.request_timing.attempts} "
+                                f"retry_sleep={format_seconds(chunk.request_timing.retry_sleep_seconds)} "
+                                f"forced_json={'yes' if chunk.request_timing.forced_json_used else 'no'}"
+                            )
             else:
                 fail_count += 1
                 newly_failed[ce] = era
                 progress.failed_years[ce] = era
                 # 失败信息仍然用 write 输出，确保用户能看到
                 tqdm.write(f"  [{ce}] {era} -> FAILED")
+                tqdm.write(f"  [Timing] [{ce}] {era} failed {summarize_year_timing(year_timing)}")
             pbar.update(1)
 
             # 每完成 10 个年份保存一次进度（减少 IO 频率）
-            if progress_file and successful_years and len(successful_years) % 10 == 0:
+            if progress_file and len(successful_years) - saved_success_checkpoint >= 10:
                 progress.done_years |= successful_years
                 save_progress(progress)
+                saved_success_checkpoint = len(successful_years)
         pbar.close()
 
     # 最终保存进度
     if progress_file:
+        final_progress_started = time.perf_counter()
         print("Saving final progress...")
         progress.done_years |= successful_years
         save_progress(progress)
+        print(f"Final progress saved in {format_seconds(time.perf_counter() - final_progress_started)}")
 
     print(f"\nDone! Output file: {output_csv}")
 
@@ -1079,20 +1186,33 @@ async def main():
 
     # 最终统计
     if output_csv.exists():
+        count_started = time.perf_counter()
         print("Counting total records...")
         with open(output_csv, "r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             next(reader)  # skip header
             total = sum(1 for _ in reader)
         print(f"\nTotal records: {total}")
+        print(f"Counted total records in {format_seconds(time.perf_counter() - count_started)}")
 
     if newly_failed:
         print(f"Failed years this run: {sorted(newly_failed.keys())}")
         print("Run with --retry-failed to reprocess them")
 
     # 按年份排序并重写 CSV
+    sort_started = time.perf_counter()
     print("Sorting and rewriting CSV...")
     sort_csv_by_year(output_csv)
+    print(f"Sorted and rewrote CSV in {format_seconds(time.perf_counter() - sort_started)}")
+
+    if year_timings:
+        slowest_years = sorted(year_timings, key=lambda item: item.total_seconds, reverse=True)[:5]
+        print("\nSlowest years:")
+        for timing in slowest_years:
+            print(
+                f"  [{timing.year_ce}] {timing.year_era}: "
+                f"{summarize_year_timing(timing)} written={timing.written_records}"
+            )
 
     # 全部完成后清理进度文件（只有正常全量跑且没有失败时才清理）
     all_years_done = len(progress.done_years | set(progress.failed_years.keys())) == len(segments)
