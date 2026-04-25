@@ -1,23 +1,86 @@
 """
 从校准版 Markdown 文本中提取明清时期灾荒食人事件记录。
 
-功能：
-- 读取 data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md
-- 按年份分段，调用 LLM API（默认 Minimax abab6.5s-chat）提取食人事件
-- 解析 LLM 返回的 JSON，验证并写入 result/明清时期灾荒食人年表.csv
-- 支持并发请求、失败重试、内容分块（单年记录过长时自动拆分）
+功能概览：
+- 读取 `data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md`
+- 按年份分段，调用 LLM API 提取食人事件
+- 解析 LLM 返回的 JSON，清洗并验证字段，写入 CSV
+- 支持并发请求、失败重试、超长内容分块、进度持久化
+- 支持按指定年份抽样、保存调试材料、重试历史失败年份
 
-环境变量（也可写入 .env 文件）：
-    LLM_API_KEY      API 密钥
-    LLM_BASE_URL     API 地址（默认 https://api.minimax.chat/v1）
-    LLM_MODEL        模型名称（默认 abab6.5s-chat）
+环境变量（也可写入仓库根目录 `.env`）：
+    LLM_API_KEY      API 密钥，必填
+    LLM_BASE_URL     API 地址，默认 https://api.minimax.chat/v1
+    LLM_MODEL        模型名称，默认 abab6.5s-chat
 
-用法：
-    # 全量提取（约 224 个年份）
-    python extract_famine_data_llm.py
+默认输入输出：
+    输入 Markdown:
+        data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md
+    默认输出 CSV:
+        result/明清时期灾荒食人年表.csv
+    进度文件:
+        processing/scripts/.extract_progress.json
+    调试目录:
+        processing/scripts/.debug/
 
-    # 先测试前 20 年
-    python extract_famine_data_llm.py --limit 20 --no-progress
+常见用法：
+    1. 全量提取
+       python extract_famine_data_llm.py
+
+    2. 只测试前 20 个年份，不写正式进度
+       python extract_famine_data_llm.py --limit 20 --no-progress
+
+    3. 跳过前 50 个年份，继续看后面的结果
+       python extract_famine_data_llm.py --offset 50 --limit 20 --no-progress
+
+    4. 只跑指定年份（适合单年检查或 prompt 调试）
+       python extract_famine_data_llm.py --sample-years 1556 --no-progress
+       python extract_famine_data_llm.py --sample-years 1556,1877 --no-progress
+
+    5. 跑指定年份并保存调试材料
+       python extract_famine_data_llm.py --sample-years 1556,1877 --debug-sample --no-progress
+       这会在 `processing/scripts/.debug/` 下保存：
+       - prompt
+       - 原始模型输出 raw response
+       - 解析后的 JSON
+
+    6. 重试历史失败年份
+       python extract_famine_data_llm.py --retry-failed
+       失败年份来自 `processing/scripts/.extract_progress.json`
+
+    7. 从头重跑全部年份
+       python extract_famine_data_llm.py --restart
+
+    8. 指定输出文件，避免覆盖正式结果
+       python extract_famine_data_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
+
+    9. 调整并发数
+       python extract_famine_data_llm.py --workers 2
+
+参数说明：
+    --limit N
+        只处理前 N 个待处理年份，常用于小样本测试。
+    --offset N
+        跳过前 N 个待处理年份。
+    --output PATH
+        自定义输出 CSV 路径。
+    --no-progress
+        不读取也不写入进度文件，适合测试。
+    --restart
+        删除现有进度文件，从头重新处理全部年份。
+    --retry-failed
+        仅处理进度文件中记录为失败的年份。
+    --workers N
+        控制并发请求数。
+    --sample-years 1644,1877
+        只处理指定公元年份，可传一个或多个，用逗号分隔。
+    --debug-sample
+        保存 prompt/raw/parsed 调试材料，通常与 `--sample-years` 搭配。
+
+进度文件说明：
+- 正常全量运行时，会把成功年份和失败年份写入 `.extract_progress.json`
+- 使用 `--limit`、`--offset`、`--sample-years` 这类测试模式时，建议同时加 `--no-progress`
+- 若某些年份失败，可先检查 `.debug/`，再用 `--retry-failed` 重跑
 """
 
 import argparse
@@ -53,6 +116,7 @@ if _env_file.exists():
 INPUT_FILE = Path(__file__).parent.parent.parent / "data" / "校准版" / "明清时期灾荒食人现象研究_陈岭_校准版.md"
 OUTPUT_CSV = Path(__file__).parent.parent.parent / "result" / "明清时期灾荒食人年表.csv"
 PROGRESS_FILE = Path(__file__).parent / ".extract_progress.json"
+DEBUG_DIR = Path(__file__).parent / ".debug"
 
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.minimax.chat/v1")
@@ -93,63 +157,98 @@ class Record:
     record: str
 
 
+@dataclass
+class LLMDebugBundle:
+    year_ce: int
+    year_era: str
+    prompt: str
+    raw_response: str
+    parsed_records: list[dict] | None
+
+
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """你是一个历史数据提取专家，负责从明清时期灾荒记录中提取食人相关事件。你的输出必须严格遵循给定的 JSON 格式。思考过程请尽量简短，将主要输出空间留给 JSON 结果。
+SYSTEM_PROMPT = """你是历史文本结构化抽取助手。你的任务是从给定史料中抽取“明确发生食人行为”的记录，并输出为 JSON 数组。
 
-重要：在构造 JSON 时，若原始记录中包含双引号（" 或 " 或 "），请在 JSON 的 record 字段中将其替换为单引号（'），以确保 JSON 格式合法。"""
+硬性要求：
+1. 只输出 JSON 数组，不输出解释、分析、思考过程、markdown 代码块。
+2. 每个元素只能包含以下字段：
+   province, city, county, ancient_name, year_ce, year_era, source, note, record
+3. 所有字段值都必须可被 JSON 正确解析；其中 year_ce 必须是整数。
+4. 无符合条件记录时，返回 []。
+5. 不确定时填“无”，不要猜测。
+6. 除非规则明确允许，否则不要根据常识补全缺失地名。
+7. record 必须尽量保留原文整行；若含双引号，统一改成单引号。"""
 
 
 # ---------------------------------------------------------------------------
 # User Prompt 模板
 # ---------------------------------------------------------------------------
-USER_PROMPT_TEMPLATE = """请从以下 {year_era}（{year_ce}年）的灾荒记录中提取所有食人事件。
+USER_PROMPT_TEMPLATE = """请处理以下 {year_era}（{year_ce}年）史料，抽取其中所有“明确发生食人行为”的记录。
 
-提取标准：
-- 必须包含食人行为关键词才提取，如"人相食"、"以人为食"、"食人肉"、"食尸体"、"人吃人"等。
-- 不提取：仅描述饥荒、大旱、大水但未提及食人行为的记录
+请严格按下面顺序判断：
 
-输出格式（严格 JSON 数组）：
-```json
-[{
-  "province": "省（简写，如河南、山东；直辖市则填北京、上海等）",
-  "city": "市（原文是什么就写什么，不要根据推理自动补全，如无填'无'；直辖市与省份相同）",
-  "county": "县（原文是什么就写什么，不要简写，不要根据推理自动补全，如无填'无'）",
-  "ancient_name": "古代地名（现代已不用的地名，如无填'无'）",
-  "year_ce": 公元年份,
-  "year_era": "年号",
-  "source": "来源（仅书名，去除年号/卷次）",
-  "note": "备注（如无填'无'）",
-  "record": "原始记录原文（完整摘抄这一行的原文，包含开头的地名和来源，不要省略）"
-}]
-```
+第一步：判断是否提取
+- 仅当原文明确出现食人行为时才提取，例如：`人相食`、`以人为食`、`食人肉`、`食尸`、`人食人`。
+- 如果只是灾荒、饥饿、逃荒、死亡，而没有明确食人行为，不提取。
 
-边界条件处理：
-1. 来源处理：去除编纂者年号和卷次信息。示例：`康熙《续修陈州志》卷四灾异` → `《续修陈州志》`；转引来源保留原始来源书名，如`——《两当县新志》（道光二十二年），转引自《西北灾荒史》第1595页` → `《两当县新志》转引《西北灾荒史》`
-2. 古代地名映射参考：以下古代地名可映射到现代地名用于填写 city/county，但 ancient_name 必须填古代地名本身：
-   - `代州`→`山西省忻州市代县`，`泽州`→`山西省晋城市`，`秦州`→`甘肃省天水市`
-   - 现代仍在用的地名（如庆阳、庄浪、辽东）不记为古代地名
-3. OCR错误：若发现明显 OCR 错误（如`个人信息`），在 note 中标注"疑似OCR错误"
-4. 顿号多县拆分：如`曲沃、洪洞、临汾`出现在同一条记录中，拆分为3条独立记录
-5. 县等格式拆分：如`静宁县等：静宁、灵台、肃州等处` → 拆分为静宁、灵台、肃州3条
-6. 泛指跳过：
-   - 多省泛指（如`两京、山东、河南、湖广...`）不提取
-   - 府级泛指（如`淮、扬、庐、凤等府饥`）不提取
-   - 但如果是`某府：府下具体县人相食`，则提取具体县
-7. 特殊地名：`秦、晋`→陕西、山西（备注说明）；`都下`→北京；`京师`→北京；`北畿`→北京
-8. 地名提取优先级：若原文中已经包含省/市/县名称，直接按原文提取，不要根据来源书名推断补充
-9. city 字段严格限制：只能填写原文中明确出现的市名（如`潍坊市`、`济南市`），不得根据县名推断所属市，不得将古代地名的现代映射填入 city
-10. 古代地名处理：若原文中出现古代地名（如`代州`、`泽州`、`秦州`等），ancient_name 填该古代地名本身；city 和 county 可根据映射规则推测现代地名填入，但必须在 note 中标注"xxx为推测，原文为古代地名xxx"。若原文中已是现代地名，则 city/county 严格按原文填写，不得推断
-11. 省份简写：province 字段只写省名，不要加"省"字（如`河南`、`山东`）；直辖市（北京、上海、天津、重庆）province 和 city 都填该直辖市名称
+第二步：判断是否拆分
+- 如果同一行中列出多个具体县名，且这些县都对应同一食人事件，应拆成多条记录，每条记录对应一个县。
+- 如果只是泛指多个省、多个府、多个地区，没有落实到具体县级地点，则不提取。
+- 如果是“某府，下属若干具体县发生人相食”，则只提取具体县，不提取泛指的府名。
+
+第三步：填写字段
+- province：
+  只写省名简称，如“河南”“山东”。
+  直辖市填“北京”“上海”“天津”“重庆”。
+  若无法确定，填“无”。
+- city：
+  只有原文明确出现市名时才填写。
+  不得根据县名反推市名。
+  若原文没有明确市名，填“无”。
+- county：
+  原文明确出现的县、州、府或其他最具体地点名称，填入这里。
+  不要自行补全。
+  若无，填“无”。
+- ancient_name：
+  仅当原文出现现代已不用的古地名时填写该古地名本身，否则填“无”。
+- source：
+  只保留书名。
+  去掉卷次、页码、年号、编者说明等附属信息。
+  若为转引，写成“原书名转引后书名”。
+- note：
+  仅在以下情况填写，否则填“无”：
+  1. 疑似 OCR 错误
+  2. 地名存在不确定性
+  3. 做了古地名识别说明
+- record：
+  保留该条记录对应的原文整行，尽量完整，不要省略开头地名和结尾来源。
+  若含双引号，改为单引号。
+
+关于古地名：
+- ancient_name 只填原文中的古地名本身。
+- 若古地名无法稳定映射到现代行政区，不要强行映射，province、city、county 可填“无”。
+- 若你非常确定映射关系，也只能在不违背“不要猜测”原则时填写，并在 note 中注明“根据古地名推定”。
+- 现代仍在用的地名，不记为 ancient_name。
+
+特殊地名可按保守规则处理：
+- `都下`、`京师`、`北畿`可按北京处理；若你认为仍不够确定，可只在 note 中说明并将相关字段填“无”。
+- `秦`、`晋`这类单字泛称，若上下文不能唯一确定，不要强行映射。
+
+正反例：
+- `大饥，民多流亡` -> 不提取
+- `人相食` -> 提取
+- `某府属甲县、乙县、丙县人相食` -> 拆成 3 条
+- `山东、河南、湖广饥，人相食` -> 泛指，不提取
 
 输出要求：
-- 只输出 JSON 数组，不要任何其他文字、解释、markdown 代码块标记
-- year_ce 必须是整数数字
-- 无食人记录的年份返回 `[]`
-- record 字段中若原文包含双引号（" 或 " 或 "），请替换为单引号（'），确保 JSON 格式合法
-
----
+- 只输出 JSON 数组，不要任何额外文字
+- 不要输出 markdown 代码块
+- 不要增加任何额外字段
+- year_ce 固定写 {year_ce}
+- year_era 固定写 {year_era}
+- 无符合条件记录时返回 []
 
 以下是 {year_era}（{year_ce}年）的记录：
 
@@ -203,10 +302,13 @@ def extract_year_segments(md_path: Path) -> list[tuple[str, int, str]]:
 # LLM 调用
 # ---------------------------------------------------------------------------
 def _sanitize_quotes(text: str) -> str:
-    """将内容中的各类双引号替换为单引号，避免 LLM 生成的 JSON 中出现未转义引号。
-    同时处理 ASCII 双引号 (U+0022) 和中文双引号 (U+201C/U+201D)。
-    """
-    return text.replace('"', "'").replace('"', "'").replace('"', "'")
+    """将内容中的各类双引号替换为单引号，避免 JSON 因未转义引号而解析失败。"""
+    return (
+        text.replace('"', "'")
+        .replace("“", "'")
+        .replace("”", "'")
+        .replace("‟", "'")
+    )
 
 
 async def _call_llm_single(
@@ -215,6 +317,7 @@ async def _call_llm_single(
     year_era: str,
     year_ce: int,
     content: str,
+    debug_dir: Path | None = None,
 ) -> list[dict]:
     """单次 LLM 调用。"""
     safe_content = _sanitize_quotes(content)
@@ -226,7 +329,7 @@ async def _call_llm_single(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.1,
+        "temperature": 0.0,
         "max_tokens": MAX_TOKENS,
     }
 
@@ -252,9 +355,20 @@ async def _call_llm_single(
                     raw = data["choices"][0]["message"]["content"]
                     last_raw = raw
                     result = parse_llm_response(raw, year_era, year_ce)
-                    if result:
+                    if debug_dir:
+                        save_debug_bundle(
+                            LLMDebugBundle(
+                                year_ce=year_ce,
+                                year_era=year_era,
+                                prompt=prompt,
+                                raw_response=raw,
+                                parsed_records=result,
+                            ),
+                            debug_dir,
+                        )
+                    if result is not None:
                         return result
-                    # 解析为空但请求成功，继续重试
+                    # 解析失败时重试；空数组 [] 也是合法结果
                     continue
             except Exception as e:
                 tqdm.write(f"  [Retry {attempt}/{MAX_RETRIES}] {year_era}({year_ce}) request failed: {e}")
@@ -284,7 +398,20 @@ async def _call_llm_single(
                     resp.raise_for_status()
                     data = await resp.json()
                     raw = data["choices"][0]["message"]["content"]
-                    return parse_llm_response(raw, year_era, year_ce)
+                    result = parse_llm_response(raw, year_era, year_ce)
+                    if debug_dir:
+                        save_debug_bundle(
+                            LLMDebugBundle(
+                                year_ce=year_ce,
+                                year_era=year_era,
+                                prompt=prompt,
+                                raw_response=raw,
+                                parsed_records=result,
+                            ),
+                            debug_dir,
+                            suffix="_forced",
+                        )
+                    return result if result is not None else []
             except Exception as e:
                 tqdm.write(f"  [Skip] {year_era}({year_ce}) forced JSON request also failed: {e}")
                 return []
@@ -299,13 +426,14 @@ async def call_llm_extract(
     year_era: str,
     year_ce: int,
     content: str,
+    debug_dir: Path | None = None,
 ) -> list[dict]:
     """
     调用 LLM API 提取单年份的食人记录。
     若内容超长，按行拆分为多个 chunk 分别调用，最后合并结果。
     """
     if len(content) <= MAX_CONTENT_CHARS:
-        return await _call_llm_single(session, semaphore, year_era, year_ce, content)
+        return await _call_llm_single(session, semaphore, year_era, year_ce, content, debug_dir=debug_dir)
 
     # 按行拆分，保持行完整性
     lines = content.splitlines()
@@ -331,7 +459,17 @@ async def call_llm_extract(
     for idx, chunk_lines in enumerate(chunks, 1):
         chunk_content = "\n".join(chunk_lines)
         header = f"【{year_era}（{year_ce}年）记录共 {len(chunks)} 部分，此为第 {idx} 部分】"
-        records = await _call_llm_single(session, semaphore, year_era, year_ce, header + "\n" + chunk_content)
+        chunk_debug_dir = None
+        if debug_dir:
+            chunk_debug_dir = debug_dir / f"{year_ce}_chunk_{idx}"
+        records = await _call_llm_single(
+            session,
+            semaphore,
+            year_era,
+            year_ce,
+            header + "\n" + chunk_content,
+            debug_dir=chunk_debug_dir,
+        )
         all_records.extend(records)
 
     return all_records
@@ -342,9 +480,23 @@ async def call_llm_extract(
 # ---------------------------------------------------------------------------
 def _save_debug_raw(year_ce: int, raw: str) -> None:
     """保存原始响应到 debug 目录。"""
-    debug_dir = Path(__file__).parent / ".debug"
+    debug_dir = DEBUG_DIR
     debug_dir.mkdir(exist_ok=True)
     (debug_dir / f"{year_ce}_raw.txt").write_text(raw, encoding="utf-8")
+
+
+def save_debug_bundle(bundle: LLMDebugBundle, debug_dir: Path, suffix: str = "") -> None:
+    """保存 prompt、原始响应和解析结果，便于比较不同提示词效果。"""
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{bundle.year_ce}_{bundle.year_era}{suffix}"
+    (debug_dir / f"{stem}_prompt.txt").write_text(bundle.prompt, encoding="utf-8")
+    (debug_dir / f"{stem}_raw.txt").write_text(bundle.raw_response, encoding="utf-8")
+    parsed_text = (
+        "PARSE_FAILED"
+        if bundle.parsed_records is None
+        else json.dumps(bundle.parsed_records, ensure_ascii=False, indent=2)
+    )
+    (debug_dir / f"{stem}_parsed.json").write_text(parsed_text, encoding="utf-8")
 
 
 def _is_think_exhausted(raw: str) -> bool:
@@ -355,9 +507,10 @@ def _is_think_exhausted(raw: str) -> bool:
     return not after_think
 
 
-def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
+def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict] | None:
     """
     从 LLM 返回的文本中解析 JSON 数组。
+    返回 None 表示解析失败；返回 [] 表示模型明确返回空数组。
     """
     text = raw.strip()
 
@@ -390,7 +543,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
                     rec["year_ce"] = year_ce
             return records
         tqdm.write(f"  [Format error] {year_era}({year_ce}): response is not an array")
-        return []
+        return None
 
     # 尝试提取方括号包裹的内容
     start = text.find("[")
@@ -407,7 +560,7 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
             except json.JSONDecodeError:
                 tqdm.write(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
                 _save_debug_raw(year_ce, raw)
-                return []
+                return None
     elif start != -1:
         # 有 [ 但没有 ]，尝试补全
         try:
@@ -415,15 +568,15 @@ def parse_llm_response(raw: str, year_era: str, year_ce: int) -> list[dict]:
         except json.JSONDecodeError:
             tqdm.write(f"  [Parse failed] {year_era}({year_ce}): JSON truncated and unrecoverable")
             _save_debug_raw(year_ce, raw)
-            return []
+            return None
     else:
         tqdm.write(f"  [Parse failed] {year_era}({year_ce}): no JSON array found")
         _save_debug_raw(year_ce, raw)
-        return []
+        return None
 
     if not isinstance(records, list):
         tqdm.write(f"  [格式错误] {year_era}({year_ce}): 返回不是数组")
-        return []
+        return None
 
     # 注入年号与公元年（确保一致）
     for rec in records:
@@ -500,26 +653,80 @@ def validate_record(raw: dict) -> Record | None:
     county = str(raw.get("county", "")).strip() or "无"
     ancient_name = str(raw.get("ancient_name", "")).strip() or "无"
     year_era = str(raw.get("year_era", "")).strip() or "无"
-    source = str(raw.get("source", "")).strip() or "无"
-    note = str(raw.get("note", "")).strip() or "无"
-    record = str(raw.get("record", "")).strip() or "无"
+    source = normalize_source(str(raw.get("source", "")).strip() or "无")
+    note = normalize_free_text(str(raw.get("note", "")).strip() or "无")
+    record = normalize_record_text(str(raw.get("record", "")).strip() or "无")
 
-    # 跳过无 province 或 province 为泛指的记录
-    if province in ("无", "") or len(province) > 15:
+    # province 过长可能是整段描述误入（中国省份最长约 9 字）
+    if len(province) > 15:
         # province 过长可能是整段描述误入（中国省份最长约 9 字）
+        return None
+
+    # 核心字段缺失时丢弃，避免写入空壳记录
+    if source == "无" or record == "无":
         return None
 
     return Record(
         province=province,
-        city=city,
-        county=county,
-        ancient_name=ancient_name,
+        city=normalize_place_field(city),
+        county=normalize_place_field(county),
+        ancient_name=normalize_place_field(ancient_name),
         year_ce=year_ce,
         year_era=year_era,
         source=source,
         note=note,
         record=record,
     )
+
+
+def normalize_free_text(value: str) -> str:
+    """压缩多余空白，保留原始信息。"""
+    value = re.sub(r"\s+", " ", value).strip()
+    return value or "无"
+
+
+def normalize_place_field(value: str) -> str:
+    """统一地点字段中的空值表达和多余空白。"""
+    value = normalize_free_text(value)
+    if value in {"", "无", "未知", "不详", "未详", "缺"}:
+        return "无"
+    return value
+
+
+def normalize_source(value: str) -> str:
+    """清洗来源字段中的卷次、页码和常见附属说明。"""
+    value = normalize_free_text(value)
+    if value == "无":
+        return value
+
+    value = re.sub(r"[，,、；;]?\s*第?\d+\s*页.*$", "", value)
+    value = re.sub(r"\s*卷[一二三四五六七八九十百千0-9]+[^\s，,、；;]*", "", value)
+    value = re.sub(r"\s*（[^）]*年[^）]*）", "", value)
+    value = re.sub(r"\s*\([^)]*year[^)]*\)", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", "", value)
+
+    if "转引" in value:
+        parts = [p for p in re.split(r"\s*转引(?:自)?\s*", value) if p]
+        cleaned_parts = [extract_book_title(p) for p in parts]
+        cleaned_parts = [p for p in cleaned_parts if p != "无"]
+        return "转引".join(cleaned_parts) if cleaned_parts else "无"
+
+    return extract_book_title(value)
+
+
+def extract_book_title(value: str) -> str:
+    titles = re.findall(r"《[^》]+》", value)
+    if titles:
+        return "、".join(dict.fromkeys(titles))
+    return value if value and len(value) <= 30 else "无"
+
+
+def normalize_record_text(value: str) -> str:
+    """统一 record 中的引号和空白，尽量保持原文。"""
+    value = normalize_free_text(_sanitize_quotes(value))
+    if value in {"", "无"}:
+        return "无"
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -603,10 +810,11 @@ async def _process_one_year(
     content: str,
     seen_keys: set[tuple],
     output_csv: Path,
+    debug_dir: Path | None = None,
 ) -> tuple[int, str, int, bool]:
     """处理单个年份，返回 (year_ce, year_era, valid_record_count, success)。"""
     try:
-        raw_records = await call_llm_extract(session, semaphore, era, ce, content)
+        raw_records = await call_llm_extract(session, semaphore, era, ce, content, debug_dir=debug_dir)
     except LLMExtractError:
         return ce, era, 0, False
 
@@ -660,6 +868,8 @@ async def main():
     parser.add_argument("--restart", action="store_true", help="Reset progress and reprocess all years")
     parser.add_argument("--retry-failed", action="store_true", help="Only reprocess years that previously failed")
     parser.add_argument("--workers", type=int, default=CONCURRENT_REQUESTS, help=f"Concurrent API requests (default: {CONCURRENT_REQUESTS})")
+    parser.add_argument("--sample-years", type=str, default=None, help="Comma-separated CE years to process, e.g. 1644,1877")
+    parser.add_argument("--debug-sample", action="store_true", help="Save prompt/raw/parsed outputs for sampled years under processing/scripts/.debug")
     args = parser.parse_args()
 
     if not INPUT_FILE.exists():
@@ -677,6 +887,14 @@ async def main():
 
     segments = extract_year_segments(INPUT_FILE)
     print(f"Parsed {len(segments)} year segments")
+
+    sample_years: set[int] | None = None
+    if args.sample_years:
+        try:
+            sample_years = {int(part.strip()) for part in args.sample_years.split(",") if part.strip()}
+        except ValueError:
+            print("Error: --sample-years must be a comma-separated list of integers")
+            sys.exit(1)
 
     # 确定输出路径
     if args.output:
@@ -709,6 +927,10 @@ async def main():
     else:
         pending = [(era, ce, content) for era, ce, content in segments if ce not in progress.done_years]
 
+    if sample_years is not None:
+        pending = [(era, ce, content) for era, ce, content in pending if ce in sample_years]
+        print(f"[Sample mode] Processing years: {sorted(sample_years)}")
+
     # 应用 offset 和 limit（在原始列表上切片，不受已处理年份影响）
     if args.offset:
         pending = pending[args.offset:]
@@ -726,14 +948,23 @@ async def main():
     workers = args.workers
     semaphore = asyncio.Semaphore(workers)
     seen_keys: set[tuple] = set()
-    completed_years: set[int] = set()
+    successful_years: set[int] = set()
     newly_failed: dict[int, str] = {}
 
     connector = aiohttp.TCPConnector(limit=workers)
     async with aiohttp.ClientSession(connector=connector) as session:
         # 创建所有任务，用 semaphore 控制并发
         tasks = [
-            _process_one_year(session, semaphore, era, ce, content, seen_keys, output_csv)
+            _process_one_year(
+                session,
+                semaphore,
+                era,
+                ce,
+                content,
+                seen_keys,
+                output_csv,
+                debug_dir=(DEBUG_DIR / str(ce)) if args.debug_sample and (sample_years is None or ce in sample_years) else None,
+            )
             for era, ce, content in pending
         ]
 
@@ -744,9 +975,9 @@ async def main():
         fail_count = 0
         for coro in asyncio.as_completed(tasks):
             ce, era, count, success = await coro
-            completed_years.add(ce)
             year_results.append((ce, era, count, success))
             if success:
+                successful_years.add(ce)
                 success_count += 1
                 progress.failed_years.pop(ce, None)
                 # 用 postfix 实时显示最新完成的年份，不打断进度条
@@ -760,15 +991,15 @@ async def main():
             pbar.update(1)
 
             # 每完成 10 个年份保存一次进度（减少 IO 频率）
-            if progress_file and len(completed_years) % 10 == 0:
-                progress.done_years |= completed_years
+            if progress_file and successful_years and len(successful_years) % 10 == 0:
+                progress.done_years |= successful_years
                 save_progress(progress)
         pbar.close()
 
     # 最终保存进度
     if progress_file:
         print("Saving final progress...")
-        progress.done_years |= completed_years
+        progress.done_years |= successful_years
         save_progress(progress)
 
     print(f"\nDone! Output file: {output_csv}")
