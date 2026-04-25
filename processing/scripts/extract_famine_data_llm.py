@@ -123,7 +123,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.minimax.chat/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "abab6.5s-chat")
 
-CONCURRENT_REQUESTS = 5           # 默认并发数
+CONCURRENT_REQUESTS = 8           # 默认并发数
 REQUEST_TIMEOUT = 180             # 单次请求超时（秒）
 MAX_RETRIES = 3                   # 失败重试次数
 MAX_CONTENT_CHARS = 2500          # 单请求内容最大字符数，超长则拆分
