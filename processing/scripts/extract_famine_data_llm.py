@@ -90,13 +90,14 @@ import json
 import os
 import re
 import sys
+import time
 
 # 修复 Windows 终端中文乱码
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
@@ -164,6 +165,64 @@ class LLMDebugBundle:
     prompt: str
     raw_response: str
     parsed_records: list[dict] | None
+
+
+@dataclass
+class RequestTiming:
+    attempts: int = 0
+    request_seconds: float = 0.0
+    retry_sleep_seconds: float = 0.0
+    parse_failures: int = 0
+    forced_json_used: bool = False
+    forced_json_success: bool = False
+    forced_json_seconds: float = 0.0
+
+
+@dataclass
+class ChunkTiming:
+    index: int
+    content_chars: int
+    elapsed_seconds: float = 0.0
+    request_timing: RequestTiming = field(default_factory=RequestTiming)
+
+
+@dataclass
+class YearTiming:
+    year_ce: int
+    year_era: str
+    total_seconds: float = 0.0
+    chunk_timings: list[ChunkTiming] = field(default_factory=list)
+    restored_records: int = 0
+    valid_records: int = 0
+    written_records: int = 0
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self.chunk_timings)
+
+    @property
+    def total_attempts(self) -> int:
+        return sum(chunk.request_timing.attempts for chunk in self.chunk_timings)
+
+    @property
+    def total_retries(self) -> int:
+        return sum(max(chunk.request_timing.attempts - 1, 0) for chunk in self.chunk_timings)
+
+    @property
+    def total_request_seconds(self) -> float:
+        return sum(chunk.request_timing.request_seconds for chunk in self.chunk_timings)
+
+    @property
+    def total_retry_sleep_seconds(self) -> float:
+        return sum(chunk.request_timing.retry_sleep_seconds for chunk in self.chunk_timings)
+
+    @property
+    def total_parse_failures(self) -> int:
+        return sum(chunk.request_timing.parse_failures for chunk in self.chunk_timings)
+
+    @property
+    def forced_json_used(self) -> bool:
+        return any(chunk.request_timing.forced_json_used for chunk in self.chunk_timings)
 
 
 # ---------------------------------------------------------------------------
