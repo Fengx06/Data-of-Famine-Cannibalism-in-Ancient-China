@@ -1,11 +1,3 @@
-import pandas as pd
-from pathlib import Path
-import sys
-import io
-import re
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-
 """
 版本差异分析与合并预处理脚本。
 
@@ -24,6 +16,14 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 - 本脚本由 consolidate_versions.py 通过 subprocess 自动调用，作为合并流程的前置步骤。
 - 也可独立运行：python compare_versions.py
 """
+
+import pandas as pd
+from pathlib import Path
+import sys
+import io
+import re
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 
 def analyze_entry_by_region():

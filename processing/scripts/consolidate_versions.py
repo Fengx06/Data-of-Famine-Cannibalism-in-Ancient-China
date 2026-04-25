@@ -1,3 +1,18 @@
+"""
+读取版本差异分析结果，按处理建议规则合并为最终数据集。
+
+功能：
+- 调用 compare_versions.py 生成最新的差异分析
+- 按处理建议（保留 / 需校验地区信息 / 需进一步分析）选择目标版本
+- 应用十余条去重规则：
+  子集合并、同地点合并、古今地名映射、空 county 处理、多地点拆分等
+- 输出 result/明清时期灾荒食人年表_汇总版.csv
+- 将可疑条目（含顿号、source 为空等）输出到待人工复核.csv
+
+用法：
+    python consolidate_versions.py
+"""
+
 import io
 import re
 import subprocess

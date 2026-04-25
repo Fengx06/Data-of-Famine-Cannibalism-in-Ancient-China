@@ -1,5 +1,17 @@
 """
-重试提取失败的年份数据，追加到主 CSV 中。
+定向重试 LLM 提取失败的年份，追加到主 CSV 中。
+
+功能：
+- 从校准版 Markdown 中提取指定失败年份的灾荒记录
+- 调用 LLM API（默认 Minimax abab6.5s-chat）提取食人事件
+- 解析、验证后追加到 result/明清时期灾荒食人年表.csv
+- 支持内容分块（单年记录超过 4000 字符时自动拆分多次请求）
+- 去重后重新排序 seq 号
+
+需修改代码中的 FAILED_YEARS 集合来指定要重试的年份。
+
+用法：
+    python retry_failed_years.py
 """
 
 import asyncio

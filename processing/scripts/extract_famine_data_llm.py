@@ -1,19 +1,23 @@
 """
-Extract Ming-Qing famine cannibalism records from calibrated Markdown to CSV.
+从校准版 Markdown 文本中提取明清时期灾荒食人事件记录。
 
-Usage:
-    export LLM_API_KEY="your-api-key"
-    export LLM_BASE_URL="https://api.minimax.chat/v1"  # or other OpenAI-compatible API
-    export LLM_MODEL="abab6.5s-chat"                    # or other model
+功能：
+- 读取 data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md
+- 按年份分段，调用 LLM API（默认 Minimax abab6.5s-chat）提取食人事件
+- 解析 LLM 返回的 JSON，验证并写入 result/明清时期灾荒食人年表.csv
+- 支持并发请求、失败重试、内容分块（单年记录过长时自动拆分）
 
-    # Full run (all 224 years)
+环境变量（也可写入 .env 文件）：
+    LLM_API_KEY      API 密钥
+    LLM_BASE_URL     API 地址（默认 https://api.minimax.chat/v1）
+    LLM_MODEL        模型名称（默认 abab6.5s-chat）
+
+用法：
+    # 全量提取（约 224 个年份）
     python extract_famine_data_llm.py
 
-    # Test with 20 years first
+    # 先测试前 20 年
     python extract_famine_data_llm.py --limit 20 --no-progress
-
-    # Skip first 10, then test 20
-    python extract_famine_data_llm.py --offset 10 --limit 20 --no-progress
 """
 
 import argparse
