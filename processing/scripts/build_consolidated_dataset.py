@@ -1,8 +1,8 @@
 """
-读取版本差异分析结果，按处理建议规则合并为最终数据集。
+读取版本差异分析结果，按处理建议规则构建最终汇总数据集。
 
 功能：
-- 调用 compare_versions.py 生成最新的差异分析
+- 调用 analyze_version_differences.py 生成最新的差异分析
 - 按处理建议（保留 / 需校验地区信息 / 需进一步分析）选择目标版本
 - 应用十余条去重规则：
   子集合并、同地点合并、古今地名映射、空 county 处理、多地点拆分等
@@ -10,7 +10,7 @@
 - 将可疑条目（含顿号、source 为空等）输出到待人工复核.csv
 
 用法：
-    python consolidate_versions.py
+    python build_consolidated_dataset.py
 """
 
 import io
@@ -116,7 +116,7 @@ def version_count(value):
 def load_analysis_result(path):
     if not path.exists():
         print(f"未找到分析结果文件: {path}")
-        print("请先运行 analyze_entry_versions.py 生成差异分析结果。")
+        print("请先运行 analyze_version_differences.py 生成差异分析结果。")
         return None
     return pd.read_csv(path)
 
@@ -534,7 +534,7 @@ def deduplicate_exact_location_by_source(result_df):
                 continue
             loc_to_indices.setdefault(loc, []).append(idx)
 
-        for indices in loc_to_indices.values():
+        for loc, indices in loc_to_indices.items():
             if len(indices) <= 1:
                 continue
             keep_idx = choose_best_keep_idx(result_df, indices, preferred_location=loc)
@@ -1095,7 +1095,18 @@ def print_summary(result_df, review_df, output_path, review_path):
 
 
 def run_analysis_script():
-    script_path = Path(__file__).with_name("analyze_entry_versions.py")
+    script_dir = Path(__file__).parent
+    candidate_names = ["analyze_version_differences.py"]
+    script_path = next(
+        (script_dir / name for name in candidate_names if (script_dir / name).exists()),
+        None,
+    )
+    if script_path is None:
+        expected = ", ".join(candidate_names)
+        raise FileNotFoundError(
+            f"未找到前置分析脚本，期望位于 {script_dir} 下的文件之一: {expected}"
+        )
+
     result = subprocess.run(
         [sys.executable, str(script_path)],
         capture_output=True,
@@ -1105,13 +1116,15 @@ def run_analysis_script():
     if result.returncode != 0:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
-        raise RuntimeError(f"分析脚本运行失败，返回码: {result.returncode}")
+        raise RuntimeError(
+            f"分析脚本运行失败: {script_path.name} (返回码: {result.returncode})"
+        )
     print(result.stdout, end="")
 
 
-def consolidate_versions():
+def build_consolidated_dataset():
     """
-    读取版本条目统计与差异分析.csv，按处理建议规则生成最终汇总表。
+    读取明清时期灾荒食人年表_版本差异分析.csv，按处理建议规则生成最终汇总表。
 
     规则：
     - 保留：所有版本一致，取自然排序后的第一个存在版本
@@ -1120,7 +1133,7 @@ def consolidate_versions():
     - 需人工处理：优先取 ref 指定版本，否则取来源版本中的第一个存在版本
     """
     base_dir = Path(__file__).parent.parent.parent / "result"
-    analysis_path = base_dir / "版本条目统计与差异分析.csv"
+    analysis_path = base_dir / "明清时期灾荒食人年表_版本差异分析.csv"
 
     # 自动运行前置分析脚本，确保分析结果是最新的
     run_analysis_script()
@@ -1152,4 +1165,4 @@ def consolidate_versions():
 
 
 if __name__ == "__main__":
-    consolidate_versions()
+    build_consolidated_dataset()

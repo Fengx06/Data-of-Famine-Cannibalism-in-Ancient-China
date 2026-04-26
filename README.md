@@ -4,6 +4,12 @@
 
 当前仓库的重点不是“只保存一份最终 CSV”，而是尽量保留从原始文本到结构化结果之间的处理中间环节，方便后续继续调 prompt、核对版本差异、补跑失败年份，以及做人工复核。
 
+## 当前数据产物
+
+当前推荐优先查看 `result/明清时期灾荒食人年表_汇总版.csv`。该文件由多轮历史版本比对、自动合并和去重后生成，当前包含 1856 条记录。
+
+`result/明清时期灾荒食人年表_待人工复核.csv` 是自动流程主动拎出的疑点清单，当前包含 7 条记录。它不是错误日志，而是“自动规则不应武断决定”的条目集合，主要用于最后的人文学术校勘。
+
 ## 项目目标
 
 - 从校准后的 Markdown 史料中提取“明确发生食人行为”的记录
@@ -21,14 +27,14 @@
 │       └── 明清时期灾荒食人现象研究_陈岭_校准版.md
 ├── processing/
 │   └── scripts/
-│       ├── extract_famine_data_llm.py
-│       ├── compare_versions.py
-│       └── consolidate_versions.py
+│       ├── extract_records_llm.py
+│       ├── analyze_version_differences.py
+│       └── build_consolidated_dataset.py
 ├── reference/
 │   └── 明清时期灾荒食人现象研究_陈岭.pdf
 ├── result/
-│   ├── 历史版本/
-│   ├── 版本条目统计与差异分析.csv
+│   ├── versions/
+│   ├── 明清时期灾荒食人年表_版本差异分析.csv
 │   ├── 明清时期灾荒食人年表.csv
 │   ├── 明清时期灾荒食人年表_汇总版.csv
 │   └── 明清时期灾荒食人年表_待人工复核.csv
@@ -66,10 +72,10 @@
 
 项目的推荐处理顺序如下：
 
-1. 使用 `extract_famine_data_llm.py` 从校准版 Markdown 中提取结构化记录
-2. 将多轮提取结果保存到 `result/历史版本/`
-3. 使用 `compare_versions.py` 比对不同版本的条目差异
-4. 使用 `consolidate_versions.py` 根据差异分析结果生成汇总版数据
+1. 使用 `extract_records_llm.py` 从校准版 Markdown 中提取结构化记录
+2. 将多轮提取结果保存到 `result/versions/`
+3. 使用 `analyze_version_differences.py` 比对不同版本的条目差异
+4. 使用 `build_consolidated_dataset.py` 根据差异分析结果生成汇总版数据
 5. 对 `明清时期灾荒食人年表_待人工复核.csv` 进行人工检查
 
 ### 流程示意
@@ -77,15 +83,15 @@
 ```text
 校准版 Markdown
     ↓
-extract_famine_data_llm.py
+extract_records_llm.py
     ↓
 多轮历史版本 CSV
     ↓
-compare_versions.py
+analyze_version_differences.py
     ↓
-版本条目统计与差异分析.csv
+明清时期灾荒食人年表_版本差异分析.csv
     ↓
-consolidate_versions.py
+build_consolidated_dataset.py
     ↓
 汇总版 CSV + 待人工复核 CSV
 ```
@@ -119,7 +125,7 @@ LLM_MODEL=abab6.5s-chat
 
 ## 脚本说明
 
-### 1. `processing/scripts/extract_famine_data_llm.py`
+### 1. `processing/scripts/extract_records_llm.py`
 
 这是当前主抽取脚本，也是日常最常用的脚本。
 
@@ -145,44 +151,44 @@ LLM_MODEL=abab6.5s-chat
 全量运行：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py
+python processing/scripts/extract_records_llm.py
 ```
 
 测试前 20 个年份：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --limit 20 --no-progress
+python processing/scripts/extract_records_llm.py --limit 20 --no-progress
 ```
 
 只跑指定年份：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --sample-years 1556 --no-progress
-python processing/scripts/extract_famine_data_llm.py --sample-years 1556,1877 --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556 --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --no-progress
 ```
 
 保存 prompt / raw / parsed 调试材料：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --sample-years 1556,1877 --debug-sample --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --debug-sample --no-progress
 ```
 
 重试历史失败年份：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --retry-failed
+python processing/scripts/extract_records_llm.py --retry-failed
 ```
 
 从头重跑：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --restart
+python processing/scripts/extract_records_llm.py --restart
 ```
 
 指定输出文件：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
 ```
 
 #### 推荐工作流
@@ -194,21 +200,21 @@ python processing/scripts/extract_famine_data_llm.py --sample-years 1556 --outpu
 3. prompt 稳定后，再跑更大的样本或全量
 4. 若全量运行中有失败年份，使用 `--retry-failed`
 
-### 2. `processing/scripts/compare_versions.py`
+### 2. `processing/scripts/analyze_version_differences.py`
 
-这个脚本用于比较 `result/历史版本/` 目录下多个版本 CSV 的差异。
+这个脚本用于比较 `result/versions/` 目录下多个版本 CSV 的差异。
 
 主要功能：
 
 - 读取多个历史版本 CSV
 - 按条目聚类分析版本差异
-- 生成 `result/版本条目统计与差异分析.csv`
+- 生成 `result/明清时期灾荒食人年表_版本差异分析.csv`
 - 输出各版本总条数和整体相似度概览
 
 运行方式：
 
 ```bash
-python processing/scripts/compare_versions.py
+python processing/scripts/analyze_version_differences.py
 ```
 
 适用场景：
@@ -217,13 +223,13 @@ python processing/scripts/compare_versions.py
 - 想知道哪些条目在不同版本之间一致
 - 想找出需要人工复核或进一步分析的部分
 
-### 3. `processing/scripts/consolidate_versions.py`
+### 3. `processing/scripts/build_consolidated_dataset.py`
 
 这个脚本用于读取差异分析结果，并生成汇总版数据。
 
 主要功能：
 
-- 自动调用 `compare_versions.py`
+- 自动调用 `analyze_version_differences.py`
 - 按处理建议选择候选版本
 - 应用去重、合并、古今地名处理等规则
 - 输出汇总版和待人工复核清单
@@ -231,7 +237,7 @@ python processing/scripts/compare_versions.py
 运行方式：
 
 ```bash
-python processing/scripts/consolidate_versions.py
+python processing/scripts/build_consolidated_dataset.py
 ```
 
 典型输出：
@@ -241,7 +247,7 @@ python processing/scripts/consolidate_versions.py
 
 ## 结果目录说明
 
-### `result/历史版本/`
+### `result/versions/`
 
 用于保存不同轮次、不同 prompt、不同策略下的历史抽取结果。  
 推荐命名清晰一些，例如：
@@ -254,13 +260,13 @@ python processing/scripts/consolidate_versions.py
 
 主抽取脚本当前直接写出的结果，通常代表“某一轮当前版本”的原始结构化抽取结果。
 
-### `result/版本条目统计与差异分析.csv`
+### `result/明清时期灾荒食人年表_版本差异分析.csv`
 
-由 `compare_versions.py` 生成，用于分析版本间一致、冲突和待处理条目。
+由 `analyze_version_differences.py` 生成，用于分析版本间一致、冲突和待处理条目。
 
 ### `result/明清时期灾荒食人年表_汇总版.csv`
 
-由 `consolidate_versions.py` 生成，是当前仓库更接近“对外使用”的汇总版本。
+由 `build_consolidated_dataset.py` 生成，是当前仓库更接近“对外使用”的汇总版本。
 
 ### `result/明清时期灾荒食人年表_待人工复核.csv`
 
@@ -270,6 +276,22 @@ python processing/scripts/consolidate_versions.py
 - 来源异常
 - 需要人工判断的版本差异
 
+当前待复核清单主要来自两类规则：
+
+- `county` 含顿号 `、`：通常表示一个字段中包含多个县或地点，例如“平定县、乐平县”“句容、溧水、溧阳”。脚本会将这类条目交给人工判断是否应拆分为多条记录，或保留为区域性事件。
+- `county` 为单字且 `record` 含顿号 `、`：通常表示原文中出现“徐、萧、丰、沛”“淮、徐、海、沐”等并列简称。脚本不自动推定这些简称对应的现代地名，而是列入复核清单。
+
+进入待复核清单不代表条目无效。它只表示自动流程认为该条目的地点结构存在歧义，适合人工结合原文语境、地方志名和历史行政区划再确认。
+
+## 人工复核建议
+
+复核 `明清时期灾荒食人年表_待人工复核.csv` 时，建议优先检查：
+
+- 并列地名是否应拆成多条记录，还是作为同一场区域性灾荒事件保留
+- 单字简称是否能确定为具体州、府、县或区域
+- `province`、`city`、`county` 是否需要补全或移动到更合适的层级
+- 修订后的条目是否需要回填到汇总版，或作为下一轮规则优化依据
+
 ## 调试与排错
 
 ### 1. 模型输出无法解析为 JSON
@@ -277,7 +299,7 @@ python processing/scripts/consolidate_versions.py
 可以先用：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --sample-years 1556 --debug-sample --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556 --debug-sample --no-progress
 ```
 
 然后查看：
@@ -291,7 +313,7 @@ python processing/scripts/extract_famine_data_llm.py --sample-years 1556 --debug
 先看是否在进度文件中记录为失败，再使用：
 
 ```bash
-python processing/scripts/extract_famine_data_llm.py --retry-failed
+python processing/scripts/extract_records_llm.py --retry-failed
 ```
 
 ### 3. 想避免污染正式进度
@@ -314,17 +336,17 @@ python processing/scripts/extract_famine_data_llm.py --retry-failed
 
 如果你准备持续迭代 prompt，建议这样管理结果：
 
-- 把每一轮结果备份到 `result/历史版本/`
+- 把每一轮结果备份到 `result/versions/`
 - 在文件名中写明版本号或策略名
 - 不要直接反复覆盖所有历史版本
-- 汇总前先跑 `compare_versions.py`
+- 汇总前先跑 `analyze_version_differences.py`
 
 一个常见做法是：
 
-1. 用 `extract_famine_data_llm.py` 生成新结果
-2. 将结果复制或重命名到 `result/历史版本/`
-3. 跑 `compare_versions.py`
-4. 跑 `consolidate_versions.py`
+1. 用 `extract_records_llm.py` 生成新结果
+2. 将结果复制或重命名到 `result/versions/`
+3. 跑 `analyze_version_differences.py`
+4. 跑 `build_consolidated_dataset.py`
 5. 检查待人工复核清单
 
 ## 当前限制

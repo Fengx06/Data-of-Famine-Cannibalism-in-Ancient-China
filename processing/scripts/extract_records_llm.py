@@ -25,37 +25,37 @@
 
 常见用法：
     1. 全量提取
-       python extract_famine_data_llm.py
+       python extract_records_llm.py
 
     2. 只测试前 20 个年份，不写正式进度
-       python extract_famine_data_llm.py --limit 20 --no-progress
+       python extract_records_llm.py --limit 20 --no-progress
 
     3. 跳过前 50 个年份，继续看后面的结果
-       python extract_famine_data_llm.py --offset 50 --limit 20 --no-progress
+       python extract_records_llm.py --offset 50 --limit 20 --no-progress
 
     4. 只跑指定年份（适合单年检查或 prompt 调试）
-       python extract_famine_data_llm.py --sample-years 1556 --no-progress
-       python extract_famine_data_llm.py --sample-years 1556,1877 --no-progress
+       python extract_records_llm.py --sample-years 1556 --no-progress
+       python extract_records_llm.py --sample-years 1556,1877 --no-progress
 
     5. 跑指定年份并保存调试材料
-       python extract_famine_data_llm.py --sample-years 1556,1877 --debug-sample --no-progress
+       python extract_records_llm.py --sample-years 1556,1877 --debug-sample --no-progress
        这会在 `processing/scripts/.debug/` 下保存：
        - prompt
        - 原始模型输出 raw response
        - 解析后的 JSON
 
     6. 重试历史失败年份
-       python extract_famine_data_llm.py --retry-failed
+       python extract_records_llm.py --retry-failed
        失败年份来自 `processing/scripts/.extract_progress.json`
 
     7. 从头重跑全部年份
-       python extract_famine_data_llm.py --restart
+       python extract_records_llm.py --restart
 
     8. 指定输出文件，避免覆盖正式结果
-       python extract_famine_data_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
+       python extract_records_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
 
     9. 调整并发数
-       python extract_famine_data_llm.py --workers 2
+       python extract_records_llm.py --workers 2
 
 参数说明：
     --limit N

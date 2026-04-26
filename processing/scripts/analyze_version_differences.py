@@ -2,19 +2,19 @@
 版本差异分析与合并预处理脚本。
 
 功能：
-1. 读取 result/历史版本/ 目录下所有 CSV（v1, v2, ...），按条目比对差异。
+1. 读取 result/versions/ 目录下所有 CSV（v1, v2, ...），按条目比对差异。
 2. analyze_entry_by_region()：按 (year_ce + province + city + county + source + record)
    聚类分析各版本条目的存在情况和内容一致性，输出处理建议：
    - 保留：所有版本一致或内容兼容
    - 需校验地区信息：同年同省同来源，地区层级存在泛指与具体并存，或地名异写
    - 需进一步分析：record 内容存在差异，需人工确认
-   结果保存至 result/版本条目统计与差异分析.csv。
+   结果保存至 result/明清时期灾荒食人年表_版本差异分析.csv。
 3. analyze_version_statistics()：统计每个版本的总条目数和总体相似度，
    直接打印到屏幕，不生成文件。
 
 调用关系：
-- 本脚本由 consolidate_versions.py 通过 subprocess 自动调用，作为合并流程的前置步骤。
-- 也可独立运行：python compare_versions.py
+- 本脚本由 build_consolidated_dataset.py 通过 subprocess 自动调用，作为合并流程的前置步骤。
+- 也可独立运行：python analyze_version_differences.py
 """
 
 import pandas as pd
@@ -34,7 +34,7 @@ def analyze_entry_by_region():
     并给出处理建议（保留 / 需校验地区信息 / 需进一步分析 / 需人工处理）。
     """
     base_dir = Path(__file__).parent.parent.parent / "result"
-    history_dir = base_dir / "历史版本"
+    history_dir = base_dir / "versions"
 
     csv_files = sorted(history_dir.glob("*.csv"))
     if not csv_files:
@@ -719,7 +719,7 @@ def analyze_entry_by_region():
     result_df = result_df.drop(columns=["_record_core"], errors="ignore")
 
     # 保存结果
-    output_path = base_dir / "版本条目统计与差异分析.csv"
+    output_path = base_dir / "明清时期灾荒食人年表_版本差异分析.csv"
     result_df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     # 输出统计信息
@@ -750,7 +750,7 @@ def analyze_version_statistics():
     相似情况定义：对于一条记录，相似情况 = 该记录出现的版本数 / 该年份有记录的版本数
     """
     base_dir = Path(__file__).parent.parent.parent / "result"
-    history_dir = base_dir / "历史版本"
+    history_dir = base_dir / "versions"
 
     csv_files = sorted(history_dir.glob("*.csv"))
     if not csv_files:
