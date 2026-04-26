@@ -29,7 +29,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import geopandas as gpd
 import pandas as pd
@@ -49,6 +49,7 @@ DEFAULT_INPUT = ROOT / "processing" / "merged_cleaned_data" / "ming_qing_famine_
 DEFAULT_CITY_SHP = ROOT / "data" / "administrative_boundaries" / "市.shp"
 DEFAULT_COUNTY_SHP = ROOT / "data" / "administrative_boundaries" / "县.shp"
 DEFAULT_OUTPUT_DIR = ROOT / "result"
+DEFAULT_CACHE_DIR = ROOT / "data" / "location_review"
 
 UNIQUE_OUT = "地名唯一表.csv"
 LLM_OUT = "地名LLM初判.csv"
@@ -169,9 +170,14 @@ def write_review_xlsx(df: pd.DataFrame, path: Path) -> None:
     df.to_excel(path, index=False)
     wb = load_workbook(path)
     ws = wb.active
+    if ws is None:
+        return
     if "confirmed_location_level" in df.columns:
         col_idx = list(df.columns).index("confirmed_location_level") + 1
-        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        cell = ws.cell(row=1, column=col_idx)
+        if cell is None:
+            return
+        col_letter = cell.column_letter
         dv = DataValidation(
             type="list",
             formula1='"province_only,prefecture_level,county_or_specific"',
@@ -303,7 +309,7 @@ def classify_location_level(province: str, city: str, county: str, city_base_nam
 
 
 def apply_location_levels(unique_df: pd.DataFrame, city_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
-    city_base_names = {normalize_place_for_match(name) for name in city_gdf["市"].map(clean_text) if clean_text(name)}
+    city_base_names = {normalize_place_for_match(str(name)) for name in city_gdf["市"].map(clean_text) if clean_text(name)}
     result = unique_df.copy()
     result["location_level"] = result.apply(
         lambda r: classify_location_level(r["province"], r["city"], r["county"], city_base_names),
@@ -313,7 +319,7 @@ def apply_location_levels(unique_df: pd.DataFrame, city_gdf: gpd.GeoDataFrame) -
 
 
 def build_modern_province_map(city_gdf: gpd.GeoDataFrame) -> dict[str, str]:
-    province_names = sorted(set(city_gdf["省"].map(clean_text)))
+    province_names = sorted({str(name) for name in city_gdf["省"].map(clean_text) if name})
     mapping = {normalize_admin_name(name): name for name in province_names if name}
     mapping.update(
         {
@@ -332,9 +338,9 @@ def build_modern_province_map(city_gdf: gpd.GeoDataFrame) -> dict[str, str]:
 
 
 def build_modern_province_code_map(city_gdf: gpd.GeoDataFrame) -> dict[str, str]:
-    province = city_gdf[["省", "省代码"]].copy()
-    province["省"] = province["省"].map(clean_text)
-    province["省代码"] = province["省代码"].map(normalize_admin_code)
+    province_names = city_gdf["省"].map(clean_text)
+    province_codes = city_gdf["省代码"].map(normalize_admin_code)
+    province = pd.DataFrame({"省": province_names, "省代码": province_codes})
     province = province[province["省"].ne("")].drop_duplicates("省")
     return {normalize_admin_name(row["省"]): row["省代码"] for _, row in province.iterrows()}
 
@@ -349,44 +355,6 @@ def modernize_province_name(province: str, province_map: dict[str, str]) -> str:
         key = normalize_admin_name(part)
         modern_parts.append(province_map.get(key, part))
     return "、".join(dict.fromkeys(modern_parts))
-
-
-def build_prefecture_lookup(city_gdf: gpd.GeoDataFrame) -> dict[tuple[str, str], dict[str, str]]:
-    lookup: dict[tuple[str, str], dict[str, str]] = {}
-    for _, row in city_gdf.iterrows():
-        province = clean_text(row.get("省", ""))
-        city = clean_text(row.get("市", ""))
-        if not city:
-            continue
-        data = {
-            "province": province,
-            "city": city,
-            "city_code": normalize_admin_code(row.get("市代码", "")),
-            "city_type": clean_text(row.get("市类型", "")),
-        }
-        province_key = normalize_admin_name(province)
-        city_keys = {city, normalize_admin_name(city), normalize_place_for_match(city)}
-        for city_key in city_keys:
-            if city_key:
-                lookup[(province_key, city_key)] = data
-                lookup[("", city_key)] = data
-    return lookup
-
-
-def match_prefecture_from_fields(row: pd.Series, lookup: dict[tuple[str, str], dict[str, str]]) -> dict[str, str]:
-    province_key = normalize_admin_name(clean_text(row.get("province", "")))
-    candidates = [clean_text(row.get("city", "")), clean_text(row.get("county", ""))]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        keys = [candidate, normalize_admin_name(candidate), normalize_place_for_match(candidate)]
-        for key in keys:
-            if (province_key, key) in lookup:
-                return lookup[(province_key, key)]
-        for key in keys:
-            if ("", key) in lookup:
-                return lookup[("", key)]
-    return {"province": "", "city": "", "city_code": "", "city_type": ""}
 
 
 def normalize_admin_code(value: Any) -> str:
@@ -532,7 +500,7 @@ def call_llm_batch(rows: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def build_location_diagnosis(unique_df: pd.DataFrame, city_gdf: gpd.GeoDataFrame, use_llm: bool, batch_size: int) -> pd.DataFrame:
-    city_names = set(city_gdf["市"].map(clean_text))
+    city_names = {str(name) for name in city_gdf["市"].map(clean_text) if name}
     city_base_names = {strip_common_suffix(name) for name in city_names if name}
     province_map = build_modern_province_map(city_gdf)
     rule_rows = [diagnose_location_rule(row, city_names, city_base_names, province_map) for _, row in unique_df.iterrows()]
@@ -857,12 +825,13 @@ def load_corrections(path: Path, review_path: Path | None = None) -> pd.DataFram
         "correction_note",
     ]
     frames: list[pd.DataFrame] = []
-    candidates = [path]
+    candidates: list[Path] = [path]
     if path.suffix.lower() == ".csv":
         candidates.append(path.with_suffix(".xlsx"))
-    candidates.append(review_path)
+    if review_path is not None:
+        candidates.append(review_path)
     for candidate in candidates:
-        if candidate is not None and candidate.exists():
+        if candidate.exists():
             frames.append(read_table(candidate))
     if not frames:
         return pd.DataFrame(columns=cols)
@@ -994,7 +963,7 @@ def make_detail_and_review(
     geocoded: pd.DataFrame,
     corrections: pd.DataFrame,
     city_gdf: gpd.GeoDataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     province_map = build_modern_province_map(city_gdf)
     province_code_map = build_modern_province_code_map(city_gdf)
     address_geocoded = geocoded[geocoded["query_type"].eq("address")].copy()
@@ -1245,21 +1214,22 @@ def main() -> None:
     county_shp = ensure_existing_path(args.county_shp, "县.shp", ROOT / "data")
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Input CSV: {input_path}")
     print(f"City boundary: {city_shp}")
     print(f"County boundary: {county_shp}")
     source_df = read_csv(input_path)
-    city_gdf = gpd.read_file(city_shp)
+    city_gdf = cast(gpd.GeoDataFrame, gpd.read_file(city_shp))
     if city_gdf.crs is None:
-        city_gdf = city_gdf.set_crs("EPSG:4326")
+        city_gdf = cast(gpd.GeoDataFrame, city_gdf.set_crs("EPSG:4326"))
     else:
-        city_gdf = city_gdf.to_crs("EPSG:4326")
-    county_gdf = gpd.read_file(county_shp)
+        city_gdf = cast(gpd.GeoDataFrame, city_gdf.to_crs("EPSG:4326"))
+    county_gdf = cast(gpd.GeoDataFrame, gpd.read_file(county_shp))
     if county_gdf.crs is None:
-        county_gdf = county_gdf.set_crs("EPSG:4326")
+        county_gdf = cast(gpd.GeoDataFrame, county_gdf.set_crs("EPSG:4326"))
     else:
-        county_gdf = county_gdf.to_crs("EPSG:4326")
+        county_gdf = cast(gpd.GeoDataFrame, county_gdf.to_crs("EPSG:4326"))
 
     unique_df = build_unique_locations(source_df)
     unique_df = apply_location_levels(unique_df, city_gdf)
@@ -1275,7 +1245,7 @@ def main() -> None:
     write_csv(diagnosis_df, output_dir / LLM_OUT)
     print(f"Wrote {LLM_OUT}: {len(diagnosis_df)} rows")
 
-    cache_path = output_dir / GEOCODE_CACHE_OUT
+    cache_path = DEFAULT_CACHE_DIR / GEOCODE_CACHE_OUT
     if args.skip_geocode:
         geocode_cache = load_geocode_cache(cache_path)
     else:
@@ -1284,12 +1254,12 @@ def main() -> None:
     write_csv(geocoded, cache_path)
     print(f"Wrote {GEOCODE_CACHE_OUT}: {len(geocoded)} rows")
 
-    corrections = load_corrections(output_dir / CORRECTIONS_IN, output_dir / MANUAL_REVIEW_XLSX_OUT)
-    persist_corrections(corrections, output_dir / CORRECTIONS_XLSX_IN)
+    corrections = load_corrections(DEFAULT_CACHE_DIR / CORRECTIONS_IN, DEFAULT_CACHE_DIR / MANUAL_REVIEW_XLSX_OUT)
+    persist_corrections(corrections, DEFAULT_CACHE_DIR / CORRECTIONS_XLSX_IN)
     detail, review = make_detail_and_review(source_df, unique_df, diagnosis_df, geocoded, corrections, city_gdf)
     write_csv(detail, output_dir / DETAIL_OUT)
-    backup_file(output_dir / MANUAL_REVIEW_XLSX_OUT)
-    write_review_xlsx(review, output_dir / MANUAL_REVIEW_XLSX_OUT)
+    backup_file(DEFAULT_CACHE_DIR / MANUAL_REVIEW_XLSX_OUT)
+    write_review_xlsx(review, DEFAULT_CACHE_DIR / MANUAL_REVIEW_XLSX_OUT)
     legacy_review_csv = output_dir / MANUAL_REVIEW_LEGACY_CSV
     if legacy_review_csv.exists():
         legacy_review_csv.unlink()
@@ -1301,7 +1271,6 @@ def main() -> None:
             [
                 output_dir / UNIQUE_OUT,
                 output_dir / LLM_OUT,
-                output_dir / MANUAL_REVIEW_XLSX_OUT,
             ]
         )
     print("Run summarize_prefecture_events.py to build the prefecture-level summary from the detail file.")
