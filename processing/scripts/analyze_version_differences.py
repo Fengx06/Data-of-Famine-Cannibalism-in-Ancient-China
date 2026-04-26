@@ -2,13 +2,13 @@
 版本差异分析与合并预处理脚本。
 
 功能：
-1. 读取 result/versions/ 目录下所有 CSV（v1, v2, ...），按条目比对差异。
+1. 读取 processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/versions/ 目录下所有 CSV（v1, v2, ...），按条目比对差异。
 2. analyze_entry_by_region()：按 (year_ce + province + city + county + source + record)
    聚类分析各版本条目的存在情况和内容一致性，输出处理建议：
    - 保留：所有版本一致或内容兼容
    - 需校验地区信息：同年同省同来源，地区层级存在泛指与具体并存，或地名异写
    - 需进一步分析：record 内容存在差异，需人工确认
-   结果保存至 result/明清时期灾荒食人年表_版本差异分析.csv。
+   结果保存至 processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_版本差异分析.csv。
 3. analyze_version_statistics()：统计每个版本的总条目数和总体相似度，
    直接打印到屏幕，不生成文件。
 
@@ -33,8 +33,8 @@ def analyze_entry_by_region():
     输出每行一个唯一条目，展示该条目在各版本中的存在情况及 record 内容差异，
     并给出处理建议（保留 / 需校验地区信息 / 需进一步分析 / 需人工处理）。
     """
-    base_dir = Path(__file__).parent.parent.parent / "result"
-    history_dir = base_dir / "versions"
+    base_dir = Path(__file__).parent.parent.parent / "processing" / "merged_cleaned_data" / "ming_qing_famine_cannibalism_chen_ling"
+    history_dir = Path(__file__).parent.parent.parent / "processing" / "record_level_cleaning" / "ming_qing_famine_cannibalism_chen_ling" / "versions"
 
     csv_files = sorted(history_dir.glob("*.csv"))
     if not csv_files:
@@ -749,8 +749,8 @@ def analyze_version_statistics():
 
     相似情况定义：对于一条记录，相似情况 = 该记录出现的版本数 / 该年份有记录的版本数
     """
-    base_dir = Path(__file__).parent.parent.parent / "result"
-    history_dir = base_dir / "versions"
+    base_dir = Path(__file__).parent.parent.parent / "processing" / "merged_cleaned_data" / "ming_qing_famine_cannibalism_chen_ling"
+    history_dir = Path(__file__).parent.parent.parent / "processing" / "record_level_cleaning" / "ming_qing_famine_cannibalism_chen_ling" / "versions"
 
     csv_files = sorted(history_dir.glob("*.csv"))
     if not csv_files:

@@ -6,7 +6,7 @@
 - 按处理建议（保留 / 需校验地区信息 / 需进一步分析）选择目标版本
 - 应用十余条去重规则：
   子集合并、同地点合并、古今地名映射、空 county 处理、多地点拆分等
-- 输出 result/明清时期灾荒食人年表_汇总版.csv
+- 输出 processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_汇总版.csv
 - 将可疑条目（含顿号、source 为空等）输出到待人工复核.csv
 
 用法：
@@ -1132,7 +1132,7 @@ def build_consolidated_dataset():
     - 需进一步分析：从 ref 候选版本中取 record 最长者，并用版本自然排序打破并列
     - 需人工处理：优先取 ref 指定版本，否则取来源版本中的第一个存在版本
     """
-    base_dir = Path(__file__).parent.parent.parent / "result"
+    base_dir = Path(__file__).parent.parent.parent / "processing" / "merged_cleaned_data" / "ming_qing_famine_cannibalism_chen_ling"
     analysis_path = base_dir / "明清时期灾荒食人年表_版本差异分析.csv"
 
     # 自动运行前置分析脚本，确保分析结果是最新的

@@ -2,7 +2,7 @@
 从校准版 Markdown 文本中提取明清时期灾荒食人事件记录。
 
 功能概览：
-- 读取 `data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md`
+- 读取 `data/calibrated_text/明清时期灾荒食人现象研究_陈岭_校准版.md`
 - 按年份分段，调用 LLM API 提取食人事件
 - 解析 LLM 返回的 JSON，清洗并验证字段，写入 CSV
 - 支持并发请求、失败重试、超长内容分块、进度持久化
@@ -15,9 +15,9 @@
 
 默认输入输出：
     输入 Markdown:
-        data/校准版/明清时期灾荒食人现象研究_陈岭_校准版.md
+        data/calibrated_text/明清时期灾荒食人现象研究_陈岭_校准版.md
     默认输出 CSV:
-        result/明清时期灾荒食人年表.csv
+        processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表.csv
     进度文件:
         processing/scripts/.extract_progress.json
     调试目录:
@@ -114,8 +114,8 @@ if _env_file.exists():
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-INPUT_FILE = Path(__file__).parent.parent.parent / "data" / "校准版" / "明清时期灾荒食人现象研究_陈岭_校准版.md"
-OUTPUT_CSV = Path(__file__).parent.parent.parent / "result" / "明清时期灾荒食人年表.csv"
+INPUT_FILE = Path(__file__).parent.parent.parent / "data" / "calibrated_text" / "明清时期灾荒食人现象研究_陈岭_校准版.md"
+OUTPUT_CSV = Path(__file__).parent.parent.parent / "processing" / "record_level_cleaning" / "ming_qing_famine_cannibalism_chen_ling" / "明清时期灾荒食人年表.csv"
 PROGRESS_FILE = Path(__file__).parent / ".extract_progress.json"
 DEBUG_DIR = Path(__file__).parent / ".debug"
 

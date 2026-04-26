@@ -2,3 +2,7 @@ aiohttp
 python-dotenv
 tqdm
 pandas
+geopandas
+shapely
+requests
+openpyxl
