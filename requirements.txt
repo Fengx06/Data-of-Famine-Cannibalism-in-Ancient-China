@@ -4,5 +4,4 @@ tqdm
 pandas
 geopandas
 shapely
-requests
 openpyxl
