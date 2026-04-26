@@ -6,15 +6,15 @@
 
 ## 当前数据产物
 
-当前推荐优先查看 `result/明清时期灾荒食人年表_汇总版.csv`。该文件由多轮历史版本比对、自动合并和去重后生成，当前包含 1856 条记录。
+当前推荐优先查看 `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_汇总版.csv`。该文件由多轮历史版本比对、自动合并和去重后生成，当前包含 1856 条记录。
 
-`result/明清时期灾荒食人年表_待人工复核.csv` 是自动流程主动拎出的疑点清单，当前包含 7 条记录。它不是错误日志，而是“自动规则不应武断决定”的条目集合，主要用于最后的人文学术校勘。
+`processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_待人工复核.csv` 是自动流程主动拎出的疑点清单，当前包含 7 条记录。它不是错误日志，而是“自动规则不应武断决定”的条目集合，主要用于最后的人文学术校勘。
 
 地名空间匹配后的结果建议查看：
 
 - `result/明清时期灾荒食人年表_地点匹配明细.csv`：逐条记录的现代行政区划匹配结果。
 - `result/明清时期灾荒食人事件_地级市汇总.csv`：按现代地级市汇总后的统计结果。
-- `result/地名人工复核表.xlsx`：地名自动匹配仍不确定、需要人工确认的地点清单。
+- `data/location_review/地名人工复核表.xlsx`：地名自动匹配仍不确定、需要人工确认的地点清单。
 
 ## 项目目标
 
@@ -33,14 +33,25 @@
 │   ├── administrative_boundaries/
 │   │   ├── 市.shp
 │   │   └── 县.shp
-│   └── calibrated_text/
-│       └── 明清时期灾荒食人现象研究_陈岭_校准版.md
+│   ├── calibrated_text/
+│   │   └── 明清时期灾荒食人现象研究_陈岭_校准版.md
+│   ├── location_review/
+│   │   ├── 地名地理编码缓存.csv
+│   │   ├── 地名人工复核表.xlsx
+│   │   └── 地名人工校订表.xlsx
+│   └── raw/
+│       └── 明清时期灾荒食人现象研究_陈岭.md
 ├── processing/
 │   ├── calibration_rules/
+│   │   └── 明清时期灾荒食人现象研究_陈岭_校准规则.md
 │   ├── merged_cleaned_data/
 │   │   └── ming_qing_famine_cannibalism_chen_ling/
+│   │       ├── 明清时期灾荒食人年表_版本差异分析.csv
+│   │       ├── 明清时期灾荒食人年表_汇总版.csv
+│   │       └── 明清时期灾荒食人年表_待人工复核.csv
 │   ├── record_level_cleaning/
 │   │   └── ming_qing_famine_cannibalism_chen_ling/
+│   │       └── versions/
 │   └── scripts/
 │       ├── extract_records_llm.py
 │       ├── analyze_version_differences.py
@@ -50,21 +61,19 @@
 ├── reference/
 │   └── 明清时期灾荒食人现象研究_陈岭.pdf
 ├── result/
-│   ├── 明清时期灾荒食人年表_版本差异分析.csv
-│   ├── 明清时期灾荒食人年表_汇总版.csv
-│   ├── 明清时期灾荒食人年表_待人工复核.csv
 │   ├── 明清时期灾荒食人年表_地点匹配明细.csv
-│   ├── 明清时期灾荒食人事件_地级市汇总.csv
-│   ├── 地名地理编码缓存.csv
-│   └── 地名人工复核表.xlsx
+│   └── 明清时期灾荒食人事件_地级市汇总.csv
 ├── .env
+├── .gitignore
 ├── LICENSE
-└── README.md
+├── README.md
+└── requirements.txt
 ```
 
 ## 数据来源
 
 - 论文：陈岭，《明清时期灾荒食人现象研究》
+- 原始 Markdown（未经校准）：`data/raw/明清时期灾荒食人现象研究_陈岭.md`
 - 校准后的工作文本：`data/calibrated_text/明清时期灾荒食人现象研究_陈岭_校准版.md`
 - PDF 参考资料：`reference/明清时期灾荒食人现象研究_陈岭.pdf`
 
@@ -95,9 +104,9 @@
 2. 将多轮提取结果保存到 `processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/versions/`
 3. 使用 `analyze_version_differences.py` 比对不同版本的条目差异
 4. 使用 `build_consolidated_dataset.py` 根据差异分析结果生成汇总版数据
-5. 对 `明清时期灾荒食人年表_待人工复核.csv` 进行人工检查
+5. 对 `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_待人工复核.csv` 进行人工检查
 6. 使用 `build_prefecture_event_summary.py` 生成地点匹配明细和地名人工复核表
-7. 人工补充 `地名人工复核表.xlsx` 后，重新运行地点匹配脚本
+7. 人工补充 `data/location_review/地名人工复核表.xlsx` 后，重新运行地点匹配脚本
 8. 使用 `summarize_prefecture_events.py` 生成地级市汇总结果
 
 ### 流程示意
@@ -168,13 +177,13 @@ BAIDU_MAP_AK=your_baidu_map_ak
 - 调用 LLM 提取“明确发生食人行为”的记录
 - 解析 JSON
 - 清洗和验证字段
-- 写入 `result/明清时期灾荒食人年表.csv`
+- 写入 `processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表.csv`
 - 在需要时保存进度和调试材料
 
 #### 默认输入输出
 
 - 输入：`data/calibrated_text/明清时期灾荒食人现象研究_陈岭_校准版.md`
-- 默认输出：`result/明清时期灾荒食人年表.csv`
+- 默认输出：`processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表.csv`
 - 进度文件：`processing/scripts/.extract_progress.json`
 - 调试目录：`processing/scripts/.debug/`
 
@@ -240,7 +249,7 @@ python processing/scripts/extract_records_llm.py --sample-years 1556 --output re
 
 - 读取多个历史版本 CSV
 - 按条目聚类分析版本差异
-- 生成 `result/明清时期灾荒食人年表_版本差异分析.csv`
+- 生成 `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_版本差异分析.csv`
 - 输出各版本总条数和整体相似度概览
 
 运行方式：
@@ -274,8 +283,8 @@ python processing/scripts/build_consolidated_dataset.py
 
 典型输出：
 
-- `result/明清时期灾荒食人年表_汇总版.csv`
-- `result/明清时期灾荒食人年表_待人工复核.csv`
+- `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_汇总版.csv`
+- `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_待人工复核.csv`
 
 ### 4. `processing/scripts/build_prefecture_event_summary.py`
 
@@ -286,7 +295,7 @@ python processing/scripts/build_consolidated_dataset.py
 - 从 `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_汇总版.csv` 读取原始记录
 - 先生成唯一地点表，减少重复地理编码
 - 对地点做规则或 LLM 初判，识别疑似古地名和需要人工复核的地名
-- 优先读取 `result/地名地理编码缓存.csv`，只对缓存缺失的地点调用百度地图 API
+- 优先读取 `data/location_review/地名地理编码缓存.csv`，只对缓存缺失的地点调用百度地图 API
 - 使用 `data/administrative_boundaries/市.shp` 和 `data/administrative_boundaries/县.shp` 做点落面匹配
 - 输出逐条地点匹配明细和 `地名人工复核表.xlsx`
 
@@ -313,8 +322,8 @@ python processing/scripts/build_prefecture_event_summary.py --clean-intermediate
 - `result/明清时期灾荒食人年表_地点匹配明细.csv`
 - `result/地名唯一表.csv`
 - `result/地名LLM初判.csv`
-- `result/地名地理编码缓存.csv`
-- `result/地名人工复核表.xlsx`
+- `data/location_review/地名地理编码缓存.csv`
+- `data/location_review/地名人工复核表.xlsx`
 
 复核表只保留 XLSX 版本，包含 `confirmed_modern_address` 和 `confirmed_location_level` 等列。人工复核后，重新运行本脚本即可优先使用复核结果。
 
@@ -354,19 +363,19 @@ python processing/scripts/summarize_prefecture_events.py
 - `明清时期灾荒食人年表_v2.csv`
 - `明清时期灾荒食人年表_promptA.csv`
 
-### `result/明清时期灾荒食人年表.csv`
+### `processing/record_level_cleaning/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表.csv`
 
-`extract_records_llm.py` 的默认输出。该文件通常代表“某一轮当前版本”的原始结构化抽取结果；如果只使用已经整理好的汇总版数据，可以不重新生成它。
+`extract_records_llm.py` 的默认输出。该文件通常代表”某一轮当前版本”的原始结构化抽取结果；如果只使用已经整理好的汇总版数据，可以不重新生成它。
 
-### `result/明清时期灾荒食人年表_版本差异分析.csv`
+### `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_版本差异分析.csv`
 
 由 `analyze_version_differences.py` 生成，用于分析版本间一致、冲突和待处理条目。
 
-### `result/明清时期灾荒食人年表_汇总版.csv`
+### `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_汇总版.csv`
 
-由 `build_consolidated_dataset.py` 生成，是当前仓库更接近“对外使用”的汇总版本。
+由 `build_consolidated_dataset.py` 生成，是当前仓库更接近”对外使用”的汇总版本。
 
-### `result/明清时期灾荒食人年表_待人工复核.csv`
+### `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_待人工复核.csv`
 
 用于集中查看自动处理仍不够稳妥的条目，例如：
 
@@ -397,7 +406,7 @@ python processing/scripts/summarize_prefecture_events.py
 
 其中 `matched_level=province` 的记录只保留到省级，不参与地级市汇总。
 
-### `result/地名人工复核表.xlsx`
+### `data/location_review/地名人工复核表.xlsx`
 
 由 `build_prefecture_event_summary.py` 生成，只列出需要人工复核的唯一地点。人工主要填写：
 
@@ -419,14 +428,14 @@ python processing/scripts/summarize_prefecture_events.py
 
 ## 人工复核建议
 
-复核 `明清时期灾荒食人年表_待人工复核.csv` 时，建议优先检查：
+复核 `processing/merged_cleaned_data/ming_qing_famine_cannibalism_chen_ling/明清时期灾荒食人年表_待人工复核.csv` 时，建议优先检查：
 
 - 并列地名是否应拆成多条记录，还是作为同一场区域性灾荒事件保留
 - 单字简称是否能确定为具体州、府、县或区域
 - `province`、`city`、`county` 是否需要补全或移动到更合适的层级
 - 修订后的条目是否需要回填到汇总版，或作为下一轮规则优化依据
 
-复核 `地名人工复核表.xlsx` 时，只需要确认现代地名和地点层级。程序会根据确认后的现代地名继续地理编码和空间匹配，不需要手动填写经纬度。
+复核 `data/location_review/地名人工复核表.xlsx` 时，只需要确认现代地名和地点层级。程序会根据确认后的现代地名继续地理编码和空间匹配，不需要手动填写经纬度。
 
 ## 调试与排错
 
