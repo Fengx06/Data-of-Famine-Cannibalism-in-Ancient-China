@@ -1,0 +1,19 @@
+# Local credentials (keep the placeholder template tracked)
+.env
+.env.*
+!.env.example
+
+# Extraction runtime state and debug material
+/processing/scripts/.debug/
+/processing/scripts/.extract_progress.json
+
+# Temporary test outputs and atomic CSV writes
+/result/test_*.csv
+/result/tmp/
+/processing/record_level_cleaning/**/明清时期灾荒食人年表_测试*条.csv
+*.csv.tmp
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+.venv/

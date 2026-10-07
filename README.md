@@ -63,12 +63,14 @@
 ├── result/
 │   ├── 明清时期灾荒食人年表_地点匹配明细.csv
 │   └── 明清时期灾荒食人事件_地级市汇总.csv
-├── .env
+├── .env.example                    # 环境变量占位符模板
 ├── .gitignore
 ├── LICENSE
 ├── README.md
 └── requirements.txt
 ```
+
+目录树列出仓库中的主要文件；本地 `.env`、调试材料、进度文件和临时测试输出不纳入版本控制。
 
 ## 数据来源
 
@@ -149,14 +151,15 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
-在仓库根目录创建 `.env` 文件，至少包含：
+先在仓库根目录复制占位符模板：
 
-```env
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.minimax.chat/v1
-LLM_MODEL=abab6.5s-chat
-BAIDU_MAP_AK=your_baidu_map_ak
+```bash
+cp .env.example .env
 ```
+
+将 `.env` 中的占位符替换为自己的配置：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 和 `BAIDU_MAP_AK`。模板不包含真实凭据；其中的示例地址和模型名必须按实际服务修改。
+
+`.env` 已被 `.gitignore` 忽略，不要提交或使用 `git add -f` 强行加入。只有不含真实凭据的 `.env.example` 可以提交。若凭据曾进入 Git 历史，应立即在对应服务撤销并轮换；仅删除文件或增加忽略规则不会移除历史中的凭据。
 
 说明：
 
@@ -198,20 +201,20 @@ python processing/scripts/extract_records_llm.py
 测试前 20 个年份：
 
 ```bash
-python processing/scripts/extract_records_llm.py --limit 20 --no-progress
+python processing/scripts/extract_records_llm.py --limit 20 --output result/test_first_20.csv --no-progress
 ```
 
 只跑指定年份：
 
 ```bash
-python processing/scripts/extract_records_llm.py --sample-years 1556 --no-progress
-python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --output result/test_1556_1877.csv --no-progress
 ```
 
 保存 prompt / raw / parsed 调试材料：
 
 ```bash
-python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --debug-sample --no-progress
+python processing/scripts/extract_records_llm.py --sample-years 1556,1877 --output result/test_1556_1877.csv --debug-sample --no-progress
 ```
 
 重试历史失败年份：
@@ -231,6 +234,8 @@ python processing/scripts/extract_records_llm.py --restart
 ```bash
 python processing/scripts/extract_records_llm.py --sample-years 1556 --output result/test_1556.csv --no-progress
 ```
+
+测试输出请使用 `result/test_*.csv` 或 `result/tmp/`（目录输出参数可指向后者），这些路径已被忽略。`--no-progress` 仅控制进度保存，不改变输出路径；指定测试输出可避免覆盖正式数据。正式数据、历史版本和人工复核文件仍保留在版本控制中。
 
 #### 推荐工作流
 
